@@ -45,6 +45,8 @@ flags.DEFINE_bool('parallel', False, help='multi gpu training')
 flags.DEFINE_string('logdir', './logs/DDPM_CIFAR10_EPS', help='log directory')
 flags.DEFINE_integer('sample_size', 64, "sampling size of images")
 flags.DEFINE_integer('sample_step', 1000, help='frequency of sampling')
+flags.DEFINE_bool("sample_ddim", False, help='enable DDIM sampling')
+flags.DEFINE_integer('T_ddim', 100, help='DDIM sampling steps')
 # Evaluation
 flags.DEFINE_integer('save_step', 5000, help='frequency of saving checkpoints, 0 to disable during training')
 flags.DEFINE_integer('eval_step', 0, help='frequency of evaluating model, 0 to disable during training')
@@ -117,10 +119,12 @@ def train():
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T).to(device)
     net_sampler = GaussianDiffusionSampler(
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.img_size,
-        FLAGS.mean_type, FLAGS.var_type).to(device)
+        FLAGS.mean_type, FLAGS.var_type,
+        FLAGS.sample_ddim, FLAGS.T_ddim).to(device)
     ema_sampler = GaussianDiffusionSampler(
         ema_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.img_size,
-        FLAGS.mean_type, FLAGS.var_type).to(device)
+        FLAGS.mean_type, FLAGS.var_type,
+        FLAGS.sample_ddim, FLAGS.T_ddim).to(device)
     if FLAGS.parallel:
         trainer = torch.nn.DataParallel(trainer)
         net_sampler = torch.nn.DataParallel(net_sampler)
@@ -216,7 +220,8 @@ def eval():
         num_res_blocks=FLAGS.num_res_blocks, dropout=FLAGS.dropout)
     sampler = GaussianDiffusionSampler(
         model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, img_size=FLAGS.img_size,
-        mean_type=FLAGS.mean_type, var_type=FLAGS.var_type).to(device)
+        mean_type=FLAGS.mean_type, var_type=FLAGS.var_type,
+        use_ddim=FLAGS.sample_ddim, T_ddim=FLAGS.T_ddim).to(device)
     if FLAGS.parallel:
         sampler = torch.nn.DataParallel(sampler)
 

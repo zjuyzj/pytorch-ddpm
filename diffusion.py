@@ -45,16 +45,23 @@ class GaussianDiffusionTrainer(nn.Module):
 
 class GaussianDiffusionSampler(nn.Module):
     def __init__(self, model, beta_1, beta_T, T, img_size=32,
-                 mean_type='eps', var_type='fixedlarge'):
+                 mean_type='eps', var_type='fixedlarge',
+                 use_ddim=False, T_ddim=100):
         assert mean_type in ['xprev' 'xstart', 'epsilon']
         assert var_type in ['fixedlarge', 'fixedsmall']
         super().__init__()
 
         self.model = model
         self.T = T
+        self.T_ddim = T_ddim
         self.img_size = img_size
         self.mean_type = mean_type
         self.var_type = var_type
+        self.use_ddim = use_ddim
+
+        T_step = 1 if not self.use_ddim else (self.T-1) / self.T_ddim
+        T_series = torch.arange(self.T-1, -1, -T_step).to(torch.int32)
+        self.T_series = list(T_series.numpy()[::-1])
 
         self.register_buffer(
             'betas', torch.linspace(beta_1, beta_T, T).double())
@@ -84,6 +91,20 @@ class GaussianDiffusionSampler(nn.Module):
         self.register_buffer(
             'posterior_mean_coef2',
             torch.sqrt(alphas) * (1. - alphas_bar_prev) / (1. - alphas_bar))
+        
+        # calculations for coefficients used in DDIM
+        mask_ddim_step = torch.full((T, ), False, dtype=torch.bool)
+        mask_ddim_step[self.T_series] = True
+        ddim_alphas_bar = torch.zeros((T, ), dtype=alphas_bar.dtype)
+        ddim_alphas_bar[mask_ddim_step] = alphas_bar[mask_ddim_step]
+        self.register_buffer('ddim_alphas_bar', ddim_alphas_bar)
+        ddim_alphas_bar_prev = torch.zeros((T, ), dtype=ddim_alphas_bar.dtype)
+        ddim_alphas_bar_1_prev_idx = int(self.T_series[0] - T_step)
+        if ddim_alphas_bar_1_prev_idx < 0:
+            ddim_alphas_bar_1_prev = torch.full((1, ), 1.0, dtype=ddim_alphas_bar.dtype)
+        else: ddim_alphas_bar_1_prev = ddim_alphas_bar[ddim_alphas_bar_1_prev_idx]
+        ddim_alphas_bar_prev[mask_ddim_step] = torch.cat((ddim_alphas_bar_1_prev, ddim_alphas_bar[mask_ddim_step][0:-1]), 0)
+        self.register_buffer('ddim_alphas_bar_prev', ddim_alphas_bar_prev)
 
     def q_mean_variance(self, x_0, x_t, t):
         """
@@ -117,31 +138,43 @@ class GaussianDiffusionSampler(nn.Module):
         )
 
     def p_mean_variance(self, x_t, t):
-        # below: only log_variance is used in the KL computations
-        model_log_var = {
-            # for fixedlarge, we set the initial (log-)variance like so to
-            # get a better decoder log likelihood
-            'fixedlarge': torch.log(torch.cat([self.posterior_var[1:2],
-                                               self.betas[1:]])),
-            'fixedsmall': self.posterior_log_var_clipped,
-        }[self.var_type]
-        model_log_var = extract(model_log_var, t, x_t.shape)
-
-        # Mean parameterization
-        if self.mean_type == 'xprev':       # the model predicts x_{t-1}
-            x_prev = self.model(x_t, t)
-            x_0 = self.predict_xstart_from_xprev(x_t, t, xprev=x_prev)
-            model_mean = x_prev
-        elif self.mean_type == 'xstart':    # the model predicts x_0
-            x_0 = self.model(x_t, t)
-            model_mean, _ = self.q_mean_variance(x_0, x_t, t)
-        elif self.mean_type == 'epsilon':   # the model predicts epsilon
+        if self.use_ddim:
+            assert self.mean_type == 'epsilon'
             eps = self.model(x_t, t)
-            x_0 = self.predict_xstart_from_eps(x_t, t, eps=eps)
-            model_mean, _ = self.q_mean_variance(x_0, x_t, t)
-        else:
-            raise NotImplementedError(self.mean_type)
-        x_0 = torch.clip(x_0, -1., 1.)
+            model_log_var = None
+            # Note that "prev" is based on DDIM's subsequence of time-steps
+            alphas_bar = extract(self.ddim_alphas_bar, t, x_t.shape)
+            alphas_bar_prev = extract(self.ddim_alphas_bar_prev, t, x_t.shape)
+            coef_eps = torch.sqrt(1. - alphas_bar_prev) - \
+                       torch.sqrt(alphas_bar_prev * (1. - alphas_bar) / alphas_bar)
+            coef_x_t = torch.sqrt(alphas_bar_prev / alphas_bar)
+            model_mean = coef_x_t * x_t + coef_eps * eps
+        else: # Original DDPM Sampling
+            # below: only log_variance is used in the KL computations
+            model_log_var = {
+                # for fixedlarge, we set the initial (log-)variance like so to
+                # get a better decoder log likelihood
+                'fixedlarge': torch.log(torch.cat([self.posterior_var[1:2],
+                                                   self.betas[1:]])),
+                'fixedsmall': self.posterior_log_var_clipped,
+            }[self.var_type]
+            model_log_var = extract(model_log_var, t, x_t.shape)
+
+            # Mean parameterization
+            if self.mean_type == 'xprev':       # the model predicts x_{t-1}
+                x_prev = self.model(x_t, t)
+                x_0 = self.predict_xstart_from_xprev(x_t, t, xprev=x_prev)
+                model_mean = x_prev
+            elif self.mean_type == 'xstart':    # the model predicts x_0
+                x_0 = self.model(x_t, t)
+                model_mean, _ = self.q_mean_variance(x_0, x_t, t)
+            elif self.mean_type == 'epsilon':   # the model predicts epsilon
+                eps = self.model(x_t, t)
+                x_0 = self.predict_xstart_from_eps(x_t, t, eps=eps)
+                model_mean, _ = self.q_mean_variance(x_0, x_t, t)
+            else:
+                raise NotImplementedError(self.mean_type)
+            x_0 = torch.clip(x_0, -1., 1.)
 
         return model_mean, model_log_var
 
@@ -150,14 +183,19 @@ class GaussianDiffusionSampler(nn.Module):
         Algorithm 2.
         """
         x_t = x_T
-        for time_step in reversed(range(self.T)):
+        for time_step in reversed(self.T_series):
             t = x_t.new_ones([x_T.shape[0], ], dtype=torch.long) * time_step
             mean, log_var = self.p_mean_variance(x_t=x_t, t=t)
-            # no noise when t == 0
-            if time_step > 0:
-                noise = torch.randn_like(x_t)
-            else:
-                noise = 0
-            x_t = mean + torch.exp(0.5 * log_var) * noise
+            # For DDIM, variance during sampling (`log_var`) is ZERO
+            # i.e. deterministic sampling, thus DDIM has consistency
+            if self.use_ddim: # log_var is None
+                x_t = mean
+            else: 
+                # no noise when t == 0
+                if time_step > 0:
+                    noise = torch.randn_like(x_t)
+                else:
+                    noise = 0
+                x_t = mean + torch.exp(0.5 * log_var) * noise
         x_0 = x_t
         return torch.clip(x_0, -1, 1)
