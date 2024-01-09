@@ -142,7 +142,7 @@ class GaussianDiffusionSampler(nn.Module):
             assert self.mean_type == 'epsilon'
             eps = self.model(x_t, t)
             model_log_var = None
-            # Note that "prev" is based on DDIM's subsequence of time-steps
+            # Note that "prev" is based on DDIM's subsequence of timesteps
             alphas_bar = extract(self.ddim_alphas_bar, t, x_t.shape)
             alphas_bar_prev = extract(self.ddim_alphas_bar_prev, t, x_t.shape)
             coef_eps = torch.sqrt(1. - alphas_bar_prev) - \
@@ -189,7 +189,7 @@ class GaussianDiffusionSampler(nn.Module):
             # For DDIM, variance during sampling (`log_var`) is ZERO
             # i.e. deterministic sampling, thus DDIM has consistency
             if self.use_ddim: # log_var is None
-                x_t = mean
+                x_t = mean if time_step != self.T_series[0] else x_t
             else: 
                 # no noise when t == 0
                 if time_step > 0:
