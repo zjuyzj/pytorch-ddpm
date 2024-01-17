@@ -3,6 +3,9 @@
 stats
 data
 logs
+ckpts
+
+*.sh
 
 .python-version
 __pycache__
