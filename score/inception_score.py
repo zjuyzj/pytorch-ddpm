@@ -5,7 +5,7 @@ from tqdm import trange
 from .inception import InceptionV3
 
 
-device = torch.device('cuda:0')
+device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
 
 def get_inception_score(images, splits=10, batch_size=32, use_torch=False,
