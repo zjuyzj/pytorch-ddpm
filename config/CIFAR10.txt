@@ -2,12 +2,12 @@
 --batch_size=128
 --beta_1=0.0001
 --beta_T=0.02
---ema_decay=0.9999
---end2end
+--ema_decay=-1
+--noend2end
 --noeval
 --eval_step=0
 --fid_cache=./stats/cifar10.train.npz
---nofid_use_torch
+--fid_use_torch
 --grad_clip=1.0
 --img_size=32
 --logdir=./ckpts
@@ -18,7 +18,7 @@
 --noparallel
 --sample_size=64
 --sample_step=1000
---save_step=50
+--save_step=100
 --total_steps=800000
 --train
---warmup=5000
+--warmup=500

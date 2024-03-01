@@ -1,7 +1,7 @@
 import copy
 import json
 import os
-import random
+# import random
 import warnings
 from absl import app, flags
 
@@ -35,13 +35,14 @@ flags.DEFINE_integer('img_size', 32, help='image size')
 flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
 flags.DEFINE_integer('batch_size', 128, help='batch size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
-flags.DEFINE_float('ema_decay', 0.9999, help="ema decay rate")
+flags.DEFINE_float('ema_decay', 0.9999, help="ema decay rate (non-positive means disable ema)")
 flags.DEFINE_bool('parallel', False, help='multi gpu training')
 flags.DEFINE_bool('end2end', True, help='enable end-to-end training')
 flags.DEFINE_bool('cont_from_ckpt', False, help='continue training from the checkpoint')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
+flags.DEFINE_bool('log_timestep', True, help='log the loss each timestep')
 flags.DEFINE_integer('sample_size', 64, "sampling size of images")
 flags.DEFINE_integer('sample_step', 1000, help='frequency of sampling')
 
@@ -52,22 +53,14 @@ flags.DEFINE_integer('num_images', 50000, help='the number of generated images f
 flags.DEFINE_bool('fid_use_torch', False, help='calculate IS and FID on gpu')
 flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache')
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+
+# os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-# def ema(source, target, param, decay):
 def ema(source, target, decay):
-    # with_all_param = param is None
-    # source_dict = source.state_dict(keep_vars=with_all_param)
     source_dict = source.state_dict()
     target_dict = target.state_dict()
-    # keys = [] if with_all_param else param
-    # if with_all_param:
-    #     for key in source_dict.keys():
-    #         if not source_dict[key].requires_grad:
-    #             continue
-    #         keys.append(key)
-    # for key in keys:
     for key in source_dict.keys():
         target_dict[key].data.copy_(
             target_dict[key].data * decay +
@@ -75,9 +68,11 @@ def ema(source, target, decay):
 
 
 def infiniteloop(dataloader):
+    epoch_cnt = 0
     while True:
         for x, y in iter(dataloader):
-            yield x
+            yield x, epoch_cnt
+        epoch_cnt += 1
 
 
 def warmup_lr(step):
@@ -109,7 +104,9 @@ def train():
         root='./data', train=True, download=True,
         transform=transforms.Compose([
             transforms.RandomHorizontalFlip(),
+            # Pixel range [0, 1.0]
             transforms.ToTensor(),
+            # Pixel range [-0.5, 0.5]->[-1.0, 1.0]
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
         ]))
     dataloader = torch.utils.data.DataLoader(
@@ -124,24 +121,16 @@ def train():
     net_model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
                              input_size=FLAGS.img_size, input_ch=3,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T).to(device)
-    ema_model = copy.deepcopy(net_model)
+    ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
     if FLAGS.parallel:
+        if ema_model is not None:
+            ema_model = torch.nn.DataParallel(ema_model)
         net_model = torch.nn.DataParallel(net_model)
-        ema_model = torch.nn.DataParallel(ema_model)
 
-    # log setup
-    os.makedirs(os.path.join(FLAGS.logdir, 'sample'), exist_ok=True)
     # sample_noises for sampling using net_model during training process
     sample_noises = net_model.get_noise(FLAGS.sample_size, device, 'all')
-    grid = (make_grid(next(iter(dataloader))[0][:FLAGS.sample_size]) + 1) / 2
-    writer = SummaryWriter(FLAGS.logdir)
-    writer.add_image('real_sample', grid)
-    writer.flush()
-    # backup all arguments
-    with open(os.path.join(FLAGS.logdir, "flagfile.txt"), 'w') as f:
-        f.write(FLAGS.flags_into_string())
     # show model size
     model_size = 0
     for param in net_model.parameters():
@@ -149,58 +138,77 @@ def train():
         model_size += param.data.nelement()
     print('Model params: %.2f M' % (model_size / 1024 / 1024))
 
-    start_step = -1
+    start_step, base_epoch = -1, 0
     if FLAGS.cont_from_ckpt:
         ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'))
         net_model.load_state_dict(ckpt['net_model'])
-        ema_model.load_state_dict(ckpt['ema_model'])
+        if ema_model is not None:
+            if ckpt['ema_model'] is None: ema_model = None
+            else: ema_model.load_state_dict(ckpt['ema_model'])
         sched.load_state_dict(ckpt['sched'])
         optim.load_state_dict(ckpt['optim'])
         start_step = ckpt['step']
+        base_epoch = ckpt['epoch']
         sample_noises = ckpt['sample_noises']
 
+    # log setup
+    os.makedirs(os.path.join(FLAGS.logdir, 'sample'), exist_ok=True)
+    purge_step = start_step if FLAGS.cont_from_ckpt else None
+    writer = SummaryWriter(FLAGS.logdir, purge_step=purge_step)
+    if not FLAGS.cont_from_ckpt:
+        grid = (make_grid(next(iter(dataloader))[0][:FLAGS.sample_size]) + 1) / 2
+        writer.add_image('real_sample', grid)
+        writer.flush()
+    # backup all arguments
+    with open(os.path.join(FLAGS.logdir, "flagfile.txt"), 'w') as f:
+        f.write(FLAGS.flags_into_string())
+
+    pbar_postfix = {'epoch': 0, 'loss': '0', 'lr': '0'}
+    if not FLAGS.end2end:
+        pbar_postfix.update({'layer': '0/0', 'layer_loss': '0'})
+
     # start training
-    with trange(FLAGS.total_steps, dynamic_ncols=True) as pbar:
+    with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
+        # Do optimization on the full net with a mini-batch each step
         for step in pbar:
-            if step <= start_step: continue
             # train
-            optim.zero_grad()
-            x_0 = next(datalooper).to(device)
-            noise = net_model.get_noise(x_0.shape[0], device, mode='single')
-            if FLAGS.end2end:
-                x_T = net_model.add_noise(x_0, noise, FLAGS.T)
-                noises = net_model.get_noise(x_0.shape[0], device, 'all', x_T)
-                # x_0_pred, param_in_graph = (net_model(noises)+1.0)/2.0, None
-                x_0_pred = (net_model(noises)+1.0)/2.0
-                loss = F.mse_loss(x_0_pred, x_0, reduction='none')
-            else:
-                t = random.randint(2, FLAGS.T)
-                x_t = net_model.add_noise(x_0, noise, t)
-                # noise_pred, param_in_graph = net_model(x_t, t)
-                noise_pred, _ = net_model(x_t, t)
-                loss = F.mse_loss(noise_pred, noise, reduction='none')
-            mse_min, mse_max = '%.2e' % loss.min(), '%.2f' % loss.max()
-            loss = loss.mean()
-            loss.backward()
+            x_0, new_epoch = next(datalooper)
+            epoch = base_epoch+new_epoch
+            pbar_postfix['epoch'] = epoch
+            x_0 = x_0.to(device)
+            timesteps, losses = list(range(2, FLAGS.T+1)) if not FLAGS.end2end else [None], []
+            for t in timesteps: # Every layer should be optimized with the same mini-batch
+                optim.zero_grad()
+                noise = net_model.get_noise(x_0.shape[0], device, mode='single')
+                if FLAGS.end2end:
+                    x_T = net_model.add_noise(x_0, noise, FLAGS.T)
+                    noises = net_model.get_noise(x_0.shape[0], device, 'all', x_T)
+                    x_0_pred = net_model(noises)
+                    loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
+                else:
+                    pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
+                    x_t = net_model.add_noise(x_0, noise, t)
+                    noise_pred = net_model(x_t, t)
+                    loss = F.mse_loss(noise_pred, noise, reduction='none').mean()
+                    pbar_postfix['layer_loss'] = '%.2e' % loss
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    net_model.parameters(), FLAGS.grad_clip)
+                optim.step()
+                if not FLAGS.end2end and FLAGS.log_timestep:
+                    writer.add_scalar(f'loss-layer_{t}', loss, step)
+                losses.append(loss)
+                pbar.set_postfix(pbar_postfix, refresh=True)
+            avg_loss = sum(losses) / len(losses)
+            writer.add_scalar('loss', avg_loss, step)
+            pbar_postfix['loss'] = '%.2e' % avg_loss
 
-            # for p in net_model.parameters():
-            #     if p.requires_grad:
-            #         if p.grad is not None: print(p.grad)
-            #         else: cnt += 1
-            # print(cnt)
-            # exit()
+            writer.add_scalar('lr', sched.get_last_lr()[0], step)
+            pbar_postfix['lr'] = '%.2e' % sched.get_last_lr()[0]
+            sched.step() # Modify the learning rate per step
 
-            torch.nn.utils.clip_grad_norm_(
-                net_model.parameters(), FLAGS.grad_clip)
-            optim.step()
-            sched.step()
-            # ema(net_model, ema_model, param_in_graph, FLAGS.ema_decay)
-            ema(net_model, ema_model, FLAGS.ema_decay)
-
-            # log
-            if not FLAGS.end2end: writer.add_scalar(f'loss-layer_{t}', loss, step)
-            writer.add_scalar('loss', loss, step)
-            pbar.set_postfix({'loss': '%.3f' % loss, 'mse_min': mse_min, 'mse_max': mse_max})
+            if ema_model is not None:
+                ema(net_model, ema_model, FLAGS.ema_decay)
 
             # sample
             if FLAGS.sample_step > 0 and step % FLAGS.sample_step == 0:
@@ -218,10 +226,11 @@ def train():
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
                 ckpt = {
                     'net_model': net_model.state_dict(),
-                    'ema_model': ema_model.state_dict(),
+                    'ema_model': ema_model.state_dict() \
+                                 if ema_model is not None else None,
                     'sched': sched.state_dict(),
                     'optim': optim.state_dict(),
-                    'step': step,
+                    'step': step, 'epoch': epoch,
                     'sample_noises': sample_noises,
                 }
                 torch.save(ckpt, os.path.join(FLAGS.logdir, 'ckpt.pt'))
@@ -229,15 +238,19 @@ def train():
             # evaluate
             if FLAGS.eval_step > 0 and step % FLAGS.eval_step == 0:
                 net_IS, net_FID, _ = _eval(net_model)
-                ema_IS, ema_FID, _ = _eval(ema_model)
+                if ema_model is not None:
+                    ema_IS, ema_FID, _ = _eval(ema_model)
                 metrics = {
                     'IS': net_IS[0],
                     'IS_std': net_IS[1],
-                    'FID': net_FID,
-                    'IS_EMA': ema_IS[0],
-                    'IS_std_EMA': ema_IS[1],
-                    'FID_EMA': ema_FID
+                    'FID': net_FID
                 }
+                if ema_model is not None:
+                    metrics.update({
+                        'IS_EMA': ema_IS[0],
+                        'IS_std_EMA': ema_IS[1],
+                        'FID_EMA': ema_FID
+                    })
                 pbar.write(
                     "%d/%d " % (step, FLAGS.total_steps) +
                     ", ".join('%s:%.3f' % (k, v) for k, v in metrics.items()))
@@ -271,13 +284,14 @@ def evaluate():
         os.path.join(FLAGS.logdir, 'samples.png'),
         nrow=16)
 
-    model.load_state_dict(ckpt['ema_model'])
-    (IS, IS_std), FID, samples = _eval(model)
-    print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
-    save_image(
-        torch.tensor(samples[:256]),
-        os.path.join(FLAGS.logdir, 'samples_ema.png'),
-        nrow=16)
+    if ckpt['ema_model'] is not None:
+        model.load_state_dict(ckpt['ema_model'])
+        (IS, IS_std), FID, samples = _eval(model)
+        print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
+        save_image(
+            torch.tensor(samples[:256]),
+            os.path.join(FLAGS.logdir, 'samples_ema.png'),
+            nrow=16)
 
 
 def main(argv):

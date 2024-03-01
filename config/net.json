@@ -1,11 +1,8 @@
 {
     "cfg": [
         {
-            "ch": 32,
-            "ch_mult": [1, 2],
-            "attn": [1],
-            "num_res_blocks": 2,
-            "dropout": 0.1
+            "stage_ch": [32, 128, 128, 256, 128, 3],
+            "block_in_stage": [1, 2, 2, 2, 2, 1]
         }
     ],
     "cfg_ratio": [1.0]

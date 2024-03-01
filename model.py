@@ -3,102 +3,26 @@ import torch, math
 from torch import nn
 from torch.nn import init
 from PIL import Image
-from UNet import UNet
-
-'''
-class NoisePredModule(nn.Module):
-    def __init__(self, input_size, input_ch, feat_net_cfg):
-        super().__init__()
-        # The feature extraction network is based on the shallow ResNet without bottleneck, and no stem.
-        # i.e. two 3x3 conv layers in one block with a shortcut connection, any number of block in one stage,
-        # downsample and double the number of channels only at the first layer of the first block in one stage
-        self.feat_net, multi_scale_ch = nn.ModuleList(), []
-        # The final output of the sub-network must bigger than 2x2
-        init_ch, block_in_stage = feat_net_cfg['init_ch'], feat_net_cfg['block_in_stage']
-        mid_ch, mid_size = feat_net_cfg['mid_ch'], feat_net_cfg['mid_size']
-        assert input_size >= pow(2, len(block_in_stage)+1)
-        for stage_idx, block_num in enumerate(block_in_stage):
-            is_first_stage = stage_idx == 0
-            for block_idx in range(block_num):
-                is_first_block = block_idx == 0
-                do_downsampling = is_first_block
-                if not (is_first_stage and is_first_block):
-                    in_ch = out_ch
-                    out_ch = 2*in_ch if do_downsampling else in_ch
-                else: in_ch, out_ch = input_ch, init_ch
-                multi_scale_ch.append(out_ch)
-                first_layer_stride = 2 if do_downsampling else 1
-                layers = nn.Conv2d(in_ch, out_ch, 3, first_layer_stride, 1, bias=False), \
-                         nn.BatchNorm2d(out_ch), \
-                         nn.ReLU(inplace=True), \
-                         nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False), \
-                         nn.BatchNorm2d(out_ch)
-                self.feat_net.append(nn.Sequential(*layers))
-                shortcut = nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, 2, 0, bias=False),
-                                         nn.BatchNorm2d(out_ch)) \
-                           if do_downsampling else nn.Identity()
-                self.feat_net.append(shortcut)
-                self.feat_net.append(nn.ReLU(inplace=True))
-        self.multi_scale_idx = [sum(block_in_stage[0:i+1])-1 for i in range(len(block_in_stage))]
-        multi_scale_ch = [multi_scale_ch[idx] for idx in self.multi_scale_idx]
-        self.pre_concat = nn.ModuleList()
-        # Construct multi-scale feature volume from CNN pyramid
-        for in_ch in multi_scale_ch:
-            layer = nn.Conv2d(in_ch, mid_ch, 1, bias=False), \
-                    nn.BatchNorm2d(mid_ch), \
-                    nn.ReLU(inplace=True), \
-                    nn.Upsample(mid_size, mode='bilinear', align_corners=False)
-            self.pre_concat.append(nn.Sequential(*layer))
-        # Generate the image of predicted noise from feature volume
-        pyramid_ch = len(self.pre_concat)*mid_ch
-        self.head = nn.Sequential(nn.Conv2d(pyramid_ch, pyramid_ch, 3, 1, 1, bias=True),
-                                  nn.Conv2d(pyramid_ch, input_ch, 1, 1, 0, bias=True),
-                                  nn.Upsample(input_size, mode='bilinear', align_corners=False))
-        self._initialize()
-
-    def _initialize(self):
-        for module in self.modules():
-            if isinstance(module, nn.Conv2d):
-                init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    init.zeros_(module.bias)
-
-    def forward(self, x):
-        multi_scale_out = []
-        for block_idx in range(len(self.feat_net)//3):
-            conv, sc, act = self.feat_net[3*block_idx:3*block_idx+3]
-            x_sc = sc(x)
-            x = conv(x) + x_sc
-            x = act(x)
-            if block_idx in self.multi_scale_idx:
-                multi_scale_out.append(x)
-        for idx in range(len(multi_scale_out)):
-            seq = self.pre_concat[idx]
-            multi_scale_out[idx] = seq(multi_scale_out[idx])
-        pyramid = torch.cat(multi_scale_out, dim=1)
-        z = self.head(pyramid)
-        return z
-'''
-
+# from UNet import UNet
 
 # Simple ResNet block without downsampling and upsampling
 class NoisePredModule(nn.Module):
     def __init__(self, input_size, input_ch, feat_net_cfg):
         super().__init__()
         self.feat_net = nn.ModuleList()
-        stage_ch_fact = feat_net_cfg['stage_ch_fact']
+        stage_ch = feat_net_cfg['stage_ch']
         block_in_stage = feat_net_cfg['block_in_stage']
-        assert len(stage_ch_fact) >= 2 and stage_ch_fact[-1] == 1
-        assert len(stage_ch_fact) == len(block_in_stage)
-        for stage_idx in range(len(stage_ch_fact)):
+        assert len(stage_ch) >= 2 and stage_ch[-1] == input_ch
+        assert len(stage_ch) == len(block_in_stage)
+        for stage_idx in range(len(stage_ch)):
             for block_idx in range(block_in_stage[stage_idx]):
                 in_ch = input_ch if stage_idx == 0 and block_idx == 0 \
-                        else input_ch*stage_ch_fact[stage_idx-1] if block_idx == 0 \
-                        else input_ch*stage_ch_fact[stage_idx]
-                out_ch = input_ch*stage_ch_fact[stage_idx]
+                        else stage_ch[stage_idx-1] if block_idx == 0 \
+                        else stage_ch[stage_idx]
+                out_ch = stage_ch[stage_idx]
                 layers = nn.Conv2d(in_ch, out_ch, 3, 1, 1, bias=False), \
                         nn.BatchNorm2d(out_ch), \
-                        nn.SiLU(inplace=True), \
+                        nn.ReLU(inplace=True), \
                         nn.Conv2d(out_ch, out_ch, 3, 1, 1, bias=False), \
                         nn.BatchNorm2d(out_ch)
                 self.feat_net.append(nn.Sequential(*layers))
@@ -106,7 +30,7 @@ class NoisePredModule(nn.Module):
                         nn.Sequential(nn.Conv2d(in_ch, out_ch, 1, 1, 0, bias=False),
                                       nn.BatchNorm2d(out_ch))
                 self.feat_net.append(shortcut)
-                self.feat_net.append(nn.SiLU(inplace=True))
+                self.feat_net.append(nn.ReLU(inplace=True))
         self._initialize()
 
     def _initialize(self):
@@ -116,6 +40,8 @@ class NoisePredModule(nn.Module):
                 # module.bias is always None yet
                 if module.bias is not None:
                     init.zeros_(module.bias)
+        for block_idx in range(len(self.feat_net)//3):
+            init.xavier_uniform_(self.feat_net[3*block_idx][-2].weight, gain=1e-5)
 
     def forward(self, x):
         for block_idx in range(len(self.feat_net)//3):
@@ -130,8 +56,8 @@ class NoisePredModule(nn.Module):
 class DenoisingModule(nn.Module):
     def __init__(self, input_size, input_ch, feat_net_cfg, alpha, alpha_bar, alpha_bar_prev, large_entropy=True):
         super().__init__()
-        # self.noise_pred = NoisePredModule(input_size, input_ch, feat_net_cfg)
-        self.noise_pred = UNet(**feat_net_cfg)
+        self.noise_pred = NoisePredModule(input_size, input_ch, feat_net_cfg)
+        # self.noise_pred = UNet(**feat_net_cfg)
         # Coefficients are non-trainable, only relative to timestep T,
         # shared by all channels and all pixels, with broadcast
         self.register_buffer('coef_input', torch.sqrt(1.0/alpha))
@@ -147,6 +73,8 @@ class DenoisingModule(nn.Module):
         # Debug: Test U-Net for original DDPM
         # pred_eps = unet(x, t).detach()
         pred_eps = self.noise_pred(x)
+        # Only pred_eps is needed
+        if z is None: return pred_eps
         pred_mean = self.coef_input*x+self.coef_eps*pred_eps
         return pred_mean+self.coef_z*z
 
@@ -166,7 +94,6 @@ class DenoisingNet(nn.Module):
         # Denoise from timestep T to 1 (total T-1 layers), finally get x_1
         # To get result x_0 (timestep 0), alpha_bar_0 is needed to calculate 
         # coef_z (timestep 1) in DenoisingModule(), but it is not defined here.
-        # If needed, alpha_bar_0 = 1.0, while coef_z is the same with timestep 2.
         cfg_idx_lut = []
         assert sum(cfg_ratio) <= 1.0 and len(cfg) == len(cfg_ratio)
         for i, ratio in enumerate(cfg_ratio):
@@ -191,12 +118,9 @@ class DenoisingNet(nn.Module):
         if t is not None: # input is x_t
             assert 2 <= t <= self.T
             x = Z if len(Z.shape) == 4 else Z.squeeze()
-            noise_pred, param_in_graph = self.net[t-2].noise_pred, []
-            for k, p in noise_pred.named_parameters():
-                if not p.requires_grad: continue
-                param_in_graph.append(f'net.{t-2}.noise_pred.{k}')
-            noise = noise_pred(x)
-            return noise, param_in_graph
+            layer = self.net[t-2]
+            pred_eps = layer(x, None)
+            return pred_eps
         else:
             x = Z[:, -1, ...]
             num_layer = len(self.net)
@@ -205,7 +129,7 @@ class DenoisingNet(nn.Module):
                 z = Z[:, index, ...]
                 # Debug: Test U-Net for original DDPM
                 # timesteps = torch.ones((x.shape[0]), dtype=torch.long)
-                # timesteps = timesteps*(index+1).to(device)
+                # timesteps = (timesteps*(index+1)).to(device)
                 # x = layer(x, z, timesteps)
                 x = layer(x, z)
             return x
@@ -238,13 +162,9 @@ class DenoisingNet(nn.Module):
 if __name__ == '__main__':
     # 1 - Build the network
     device = torch.device('cpu')
-    # cfg = [{'init_ch': 32, 'block_in_stage': [3, 4, 6, 3], 'mid_ch': 16, 'mid_size': 16},
-    #        {'init_ch': 32, 'block_in_stage': [2, 2, 2, 2], 'mid_ch': 16, 'mid_size': 16},
-    #        {'init_ch': 32, 'block_in_stage': [2, 2, 2], 'mid_ch': 16, 'mid_size': 16}]
-    # cfg_ratio = [0.1, 0.3, 0.6]
-    # cfg = [{'stage_ch_fact': [1, 4, 8, 16, 64, 32, 16, 8, 4, 1],
-    #         'block_in_stage': [1, 2, 4, 4, 2, 2, 4, 4, 2, 1]}]
-    cfg = [{'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1}]
+    # cfg = [{'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1}]
+    cfg = [{'stage_ch': [32, 128, 128, 256, 128, 3],
+            'block_in_stage': [1, 2, 2, 2, 2, 1]}]
     cfg_ratio = [1.0]
     model = DenoisingNet(100, cfg, cfg_ratio).to(device).eval()
     # print(model)
@@ -282,7 +202,8 @@ if __name__ == '__main__':
 
     # 6 - Sample from the model
     Z = model.get_noise(5, device, 'all')
-    res = model(Z)
+    with torch.no_grad():
+        res = model(Z)
     print(res.shape)
 
     # 7 - Save the sampled image(s)

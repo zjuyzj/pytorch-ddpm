@@ -7,7 +7,7 @@ from .inception import InceptionV3
 from .fid import calculate_frechet_distance, torch_cov
 
 
-device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def get_inception_and_fid_score(images, fid_cache, num_images=None,
