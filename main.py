@@ -32,6 +32,7 @@ flags.DEFINE_float('lr', 2e-4, help='target learning rate')
 flags.DEFINE_float('grad_clip', 1., help="gradient norm clipping")
 flags.DEFINE_integer('total_steps', 800000, help='total training steps')
 flags.DEFINE_integer('img_size', 32, help='image size')
+flags.DEFINE_integer('img_ch', 3, help='image channel')
 flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
 flags.DEFINE_integer('batch_size', 128, help='batch size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
@@ -119,7 +120,7 @@ def train():
 
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                             input_size=FLAGS.img_size, input_ch=3,
+                             input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
@@ -214,7 +215,7 @@ def train():
             if FLAGS.sample_step > 0 and step % FLAGS.sample_step == 0:
                 net_model.eval()
                 with torch.no_grad():
-                    x_0 = net_model(sample_noises)
+                    x_0 = net_model(sample_noises).clip(-1, 1)
                     grid = (make_grid(x_0) + 1) / 2
                     path = os.path.join(
                         FLAGS.logdir, 'sample', '%d.png' % step)
@@ -269,7 +270,7 @@ def evaluate():
 
     # model setup
     model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                         input_size=FLAGS.img_size, input_ch=3,
+                         input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
                          beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T).to(device)
     if FLAGS.parallel:
         model = torch.nn.DataParallel(model)

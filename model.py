@@ -2,9 +2,11 @@
 import torch, math
 from torch import nn
 from torch.nn import init
-from PIL import Image
-# from UNet import UNet
+import matplotlib.pyplot as plt
+from UNet import UNet
+# from UNet_T import UNet_T
 
+'''
 # Simple ResNet block without downsampling and upsampling
 class NoisePredModule(nn.Module):
     def __init__(self, input_size, input_ch, feat_net_cfg):
@@ -51,13 +53,13 @@ class NoisePredModule(nn.Module):
             x = act(x)
         z = x # Predicted noise
         return z
-
+'''
 
 class DenoisingModule(nn.Module):
     def __init__(self, input_size, input_ch, feat_net_cfg, alpha, alpha_bar, alpha_bar_prev, large_entropy=True):
         super().__init__()
-        self.noise_pred = NoisePredModule(input_size, input_ch, feat_net_cfg)
-        # self.noise_pred = UNet(**feat_net_cfg)
+        # self.noise_pred = NoisePredModule(input_size, input_ch, feat_net_cfg)
+        self.noise_pred = UNet(**feat_net_cfg)
         # Coefficients are non-trainable, only relative to timestep T,
         # shared by all channels and all pixels, with broadcast
         self.register_buffer('coef_input', torch.sqrt(1.0/alpha))
@@ -68,15 +70,20 @@ class DenoisingModule(nn.Module):
             self.register_buffer('coef_z', torch.sqrt(1.0-alpha))
 
     # Debug: Test U-Net for original DDPM
-    # def forward(self, x, z, t):
-    def forward(self, x, z):
+    # def forward(self, x, z, t, with_pred_eps=False):
+    def forward(self, x, z, with_pred_eps=False):
         # Debug: Test U-Net for original DDPM
         # pred_eps = unet(x, t).detach()
         pred_eps = self.noise_pred(x)
         # Only pred_eps is needed
-        if z is None: return pred_eps
+        if z is None:
+            assert with_pred_eps
+            return pred_eps
         pred_mean = self.coef_input*x+self.coef_eps*pred_eps
-        return pred_mean+self.coef_z*z
+        pred_x_prev = pred_mean+self.coef_z*z
+        if with_pred_eps:
+            return pred_x_prev, pred_eps
+        else: return pred_x_prev 
 
 
 class DenoisingNet(nn.Module):
@@ -114,25 +121,36 @@ class DenoisingNet(nn.Module):
     # If param t is not None and in range [2, T], size of the second dim of Z must be 1 or not exist,
     # only noise prediction of timestep t, which is used to to get x_(t-1), is calculated.
     def forward(self, Z, t=None):
-        # x_0 denotes pure input image 
-        if t is not None: # input is x_t
-            assert 2 <= t <= self.T
-            x = Z if len(Z.shape) == 4 else Z.squeeze()
-            layer = self.net[t-2]
-            pred_eps = layer(x, None)
-            return pred_eps
-        else:
+        # x_0 denotes pure input image
+        if t is None or t == 'all':
             x = Z[:, -1, ...]
             num_layer = len(self.net)
+            if t == 'all': x_all, pred_eps_all = [x], []
             for index in range(num_layer-1, -1, -1):
                 layer = self.net[index]
                 z = Z[:, index, ...]
-                # Debug: Test U-Net for original DDPM
-                # timesteps = torch.ones((x.shape[0]), dtype=torch.long)
-                # timesteps = (timesteps*(index+1)).to(device)
-                # x = layer(x, z, timesteps)
-                x = layer(x, z)
-            return x
+                if t == 'all': # Collect intermediate x and eps in reference
+                    # Debug: Test U-Net for original DDPM
+                    # timesteps = torch.ones((x.shape[0]), dtype=torch.long)
+                    # timesteps = (timesteps*(index+1)).to(device)
+                    # x, pred_eps = layer(x, z, timesteps, with_pred_eps=True)
+                    x, pred_eps = layer(x, z, with_pred_eps=True)
+                    x_all.insert(0, x)
+                    pred_eps_all.insert(0, pred_eps)
+                else:
+                    x = layer(x, z)
+            if t == 'all':
+                x_all = torch.stack(x_all, dim=0)
+                pred_eps_all = torch.stack(pred_eps_all, dim=0)
+                return x_all, pred_eps_all
+            else: return x
+        # Return predicted noise from timestep t to (t-1)
+        elif 2 <= t <= self.T:
+            x = Z if len(Z.shape) == 4 else Z.squeeze()
+            layer = self.net[t-2]
+            pred_eps = layer(x, None, with_pred_eps=True)
+            return pred_eps
+        return None # Illegal timestep t
     
     # Utilities for training and sampling
 
@@ -158,21 +176,31 @@ class DenoisingNet(nn.Module):
         coef_x = self.coef_input_forward[t-1]
         coef_z = self.coef_z_forward[t-1]
         return x*coef_x+z*coef_z
+    
+def _img_tensor_to_np(img_tensor):
+    img = (img_tensor.clip(-1, 1)+1.0)/2.0
+    # Rounding: Add 0.5 -> Clamp
+    img = img.mul(255).add_(0.5).clamp_(0, 255)
+    img_np = img.permute(1, 2, 0).to('cpu', torch.uint8).numpy()
+    return img_np
 
 if __name__ == '__main__':
     # 1 - Build the network
     device = torch.device('cpu')
-    # cfg = [{'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1}]
-    cfg = [{'stage_ch': [32, 128, 128, 256, 128, 3],
-            'block_in_stage': [1, 2, 2, 2, 2, 1]}]
+    # cfg = [{'stage_ch': [32, 128, 128, 256, 128, 3],
+    #         'block_in_stage': [1, 2, 2, 2, 2, 1]}]
+    cfg = [{'ch': 128, 'ch_mult': [1, 2, 2, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1}]
     cfg_ratio = [1.0]
-    model = DenoisingNet(100, cfg, cfg_ratio).to(device).eval()
+    model = DenoisingNet(20, cfg, cfg_ratio).to(device).eval()
     # print(model)
 
     # Debug: Test U-Net for original DDPM, T=1000
-    # unet = UNet(1000, 128, [1, 2, 2, 2], [1], 2, 0.1).to(device).eval()
+    # unet = UNet_T(1000, 128, [1, 2, 2, 2], [1], 2, 0.1).to(device).eval()
     # state_dict = torch.load('./ckpts/backups/ckpt.pt', map_location=device)['ema_model']
     # unet.load_state_dict(state_dict)
+
+    # state_dict = torch.load('./ckpts/ckpt.pt', map_location=device)['net_model']
+    # model.load_state_dict(state_dict)
 
     # 2 - Dump the network configurations
     # print(json.dumps({'cfg': cfg, 'cfg_ratio': cfg_ratio}, indent=4))
@@ -203,17 +231,35 @@ if __name__ == '__main__':
     # 6 - Sample from the model
     Z = model.get_noise(5, device, 'all')
     with torch.no_grad():
-        res = model(Z)
-    print(res.shape)
+        x_all, pred_eps_all = model(Z, t='all')
+    torch.save({'x': x_all, 'pred_eps': pred_eps_all}, 'samples.pth')
 
-    # 7 - Save the sampled image(s)
-    res = (res.clip(-1, 1)+1.0)/2.0
-    for i in range(res.shape[0]):
-        # Rounding: Add 0.5 -> Clamp
-        np_img = res[i, ...].mul(255).add_(0.5).clamp_(0, 255) \
-                .permute(1, 2, 0).to('cpu', torch.uint8).numpy()
-        Image.fromarray(np_img).save(f'sample_{i}.jpg')
+    # 7 - Display the sampled image(s)
+    num_t_display, samples = 10, torch.load('samples.pth')
+    x_all, pred_eps_all = samples['x'], samples['pred_eps']
+    assert x_all.shape[0] == (pred_eps_all.shape[0]+1)
+    x_indexes = torch.linspace(0, x_all.shape[0]-1, num_t_display, dtype=torch.int64)
+    eps_indexes = (x_indexes-1)[1:]
+    x_all, pred_eps_all = x_all[x_indexes], pred_eps_all[eps_indexes]
+    num_sample = x_all.shape[1]
+    fig_h, fig_w = num_sample*2, num_t_display
+    fig = plt.figure()
+    for i in range(num_sample):
+        for j in range(num_t_display):
+            img_x = _img_tensor_to_np(x_all[j, i, ...])
+            fig_idx_x = (i*2)*fig_w+j+1
+            fig.add_subplot(fig_h, fig_w, fig_idx_x)
+            plt.imshow(img_x)
+            if j != 0: # Not the first column
+                img_eps = _img_tensor_to_np(pred_eps_all[j-1, i, ...])
+                fig_idx_eps = (i*2+1)*fig_w+j+1
+                fig.add_subplot(fig_h, fig_w, fig_idx_eps)
+                plt.imshow(img_eps)
+    for ax in fig.axes:
+        ax.set_axis_off()
+    plt.savefig('samples.png')
+    # plt.show() # plt.show() create a new figure
 
     # 8 - Readd noise to certain timestep
-    # x_t = model.add_noise(res, model.get_noise(5, device, 'single'), 100)
+    # x_t = model.add_noise(x_all[0], model.get_noise(5, device, 'single'), 100)
     # print(x_t.shape)

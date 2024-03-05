@@ -1,0 +1,12 @@
+{
+    "cfg": [
+        {
+            "ch": 128,
+            "ch_mult": [1, 2, 2, 2],
+            "attn": [1],
+            "num_res_blocks": 2,
+            "dropout": 0.1
+        }
+    ],
+    "cfg_ratio": [1.0]
+}

@@ -1,4 +1,4 @@
---T=100
+--T=20
 --batch_size=128
 --beta_1=0.0001
 --beta_T=0.02
@@ -12,13 +12,13 @@
 --img_size=32
 --logdir=./ckpts
 --lr=0.0002
---net_cfg=./config/net.json
+--net_cfg=./config/net_unet.json
 --num_images=50000
 --num_workers=4
 --noparallel
 --sample_size=64
 --sample_step=1000
---save_step=100
+--save_step=5000
 --total_steps=800000
 --train
---warmup=500
+--warmup=5000
