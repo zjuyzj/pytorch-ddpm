@@ -16,6 +16,7 @@ from tqdm import trange
 from model import DenoisingNet
 from score.both import get_inception_and_fid_score
 
+# from torchviz import make_dot
 
 FLAGS = flags.FLAGS
 flags.DEFINE_bool('train', False, help='train from scratch')
@@ -46,9 +47,10 @@ flags.DEFINE_string('logdir', './ckpts', help='log directory')
 flags.DEFINE_bool('log_timestep', True, help='log the loss each timestep')
 flags.DEFINE_integer('sample_size', 64, "sampling size of images")
 flags.DEFINE_integer('sample_step', 1000, help='frequency of sampling')
+flags.DEFINE_integer('tau_S', -1, help='DDIM sampling steps (non-positive means disable DDIM sampling)')
 
 # Evaluation
-flags.DEFINE_integer('save_step', 50, help='frequency of saving checkpoints, 0 to disable during training')
+flags.DEFINE_integer('save_step', 5000, help='frequency of saving checkpoints, 0 to disable during training')
 flags.DEFINE_integer('eval_step', 0, help='frequency of evaluating model, 0 to disable during training')
 flags.DEFINE_integer('num_images', 50000, help='the number of generated images for evaluation')
 flags.DEFINE_bool('fid_use_torch', False, help='calculate IS and FID on gpu')
@@ -121,7 +123,7 @@ def train():
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
                              input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
-                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T).to(device)
+                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
@@ -171,17 +173,18 @@ def train():
     # start training
     with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
         # Do optimization on the full net with a mini-batch each step
+        timesteps = net_model.get_t_series() if not FLAGS.end2end else [None]
         for step in pbar:
             # train
             x_0, new_epoch = next(datalooper)
             epoch = base_epoch+new_epoch
             pbar_postfix['epoch'] = epoch
-            x_0 = x_0.to(device)
-            timesteps, losses = list(range(2, FLAGS.T+1)) if not FLAGS.end2end else [None], []
+            x_0, losses = x_0.to(device), []
             for t in timesteps: # Every layer should be optimized with the same mini-batch
                 optim.zero_grad()
                 noise = net_model.get_noise(x_0.shape[0], device, mode='single')
                 if FLAGS.end2end:
+                    # timesteps[-1] equals FLAGS.T when DDIM sampling is enabled
                     x_T = net_model.add_noise(x_0, noise, FLAGS.T)
                     noises = net_model.get_noise(x_0.shape[0], device, 'all', x_T)
                     x_0_pred = net_model(noises)
@@ -190,6 +193,9 @@ def train():
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
                     x_t = net_model.add_noise(x_0, noise, t)
                     noise_pred = net_model(x_t, t)
+                    # graph_param = dict(list(net_model.named_parameters()))
+                    # graph = make_dot(noise_pred, params=graph_param)
+                    # graph.render('graph', format='png')
                     loss = F.mse_loss(noise_pred, noise, reduction='none').mean()
                     pbar_postfix['layer_loss'] = '%.2e' % loss
                 loss.backward()
@@ -197,7 +203,7 @@ def train():
                     net_model.parameters(), FLAGS.grad_clip)
                 optim.step()
                 if not FLAGS.end2end and FLAGS.log_timestep:
-                    writer.add_scalar(f'loss-layer_{t}', loss, step)
+                    writer.add_scalar(f'loss-timestep_{t}', loss, step)
                 losses.append(loss)
                 pbar.set_postfix(pbar_postfix, refresh=True)
             avg_loss = sum(losses) / len(losses)
@@ -215,8 +221,8 @@ def train():
             if FLAGS.sample_step > 0 and step % FLAGS.sample_step == 0:
                 net_model.eval()
                 with torch.no_grad():
-                    x_0 = net_model(sample_noises).clip(-1, 1)
-                    grid = (make_grid(x_0) + 1) / 2
+                    pred_x_0 = net_model(sample_noises).clip(-1, 1)
+                    grid = (make_grid(pred_x_0) + 1) / 2
                     path = os.path.join(
                         FLAGS.logdir, 'sample', '%d.png' % step)
                     save_image(grid, path)
@@ -271,7 +277,7 @@ def evaluate():
     # model setup
     model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
                          input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
-                         beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T).to(device)
+                         beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     if FLAGS.parallel:
         model = torch.nn.DataParallel(model)
 
