@@ -1,4 +1,5 @@
 {
+    "net_type": "UNet", 
     "cfg": [
         {
             "ch": 128,

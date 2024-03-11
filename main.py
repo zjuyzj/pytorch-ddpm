@@ -8,7 +8,7 @@ from absl import app, flags
 import torch
 import torch.nn.functional as F
 from tensorboardX import SummaryWriter
-from torchvision.datasets import CIFAR10
+from torchvision.datasets import CIFAR10, MNIST, FashionMNIST
 from torchvision.utils import make_grid, save_image
 from torchvision import transforms
 from tqdm import trange
@@ -28,12 +28,15 @@ flags.DEFINE_float('beta_T', 0.02, help='end beta value')
 flags.DEFINE_integer('T', 100, help='total diffusion steps')
 flags.DEFINE_string('net_cfg', './config/net.json', help='path of network conf file (JSON)')
 
+# Dataset
+flags.DEFINE_string('dataset', 'CIFAR10', help='dataset selection (CIFAR10/MNIST/FashionMNIST)')
+
 # Training
 flags.DEFINE_float('lr', 2e-4, help='target learning rate')
 flags.DEFINE_float('grad_clip', 1., help="gradient norm clipping")
 flags.DEFINE_integer('total_steps', 800000, help='total training steps')
-flags.DEFINE_integer('img_size', 32, help='image size')
-flags.DEFINE_integer('img_ch', 3, help='image channel')
+flags.DEFINE_integer('input_size', 32, help='size of image fed into the network (in 2^k for UNet) as well as the output')
+flags.DEFINE_integer('input_ch', 3, help='image channel (must match the train set)')
 flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
 flags.DEFINE_integer('batch_size', 128, help='batch size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
@@ -54,7 +57,7 @@ flags.DEFINE_integer('save_step', 5000, help='frequency of saving checkpoints, 0
 flags.DEFINE_integer('eval_step', 0, help='frequency of evaluating model, 0 to disable during training')
 flags.DEFINE_integer('num_images', 50000, help='the number of generated images for evaluation')
 flags.DEFINE_bool('fid_use_torch', False, help='calculate IS and FID on gpu')
-flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache')
+flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache (must match the train set)')
 
 
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
@@ -102,16 +105,16 @@ def _eval(model):
 
 
 def train():
-    # dataset
-    dataset = CIFAR10(
-        root='./data', train=True, download=True,
-        transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            # Pixel range [0, 1.0]
-            transforms.ToTensor(),
-            # Pixel range [-0.5, 0.5]->[-1.0, 1.0]
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]))
+    # dataset setup
+    dataset_norm_factor = tuple([0.5]*FLAGS.input_ch)
+    dataset_transform = transforms.Compose([transforms.RandomHorizontalFlip(),
+                                            transforms.Resize(FLAGS.input_size),
+                                            # Pixel range [0, 1.0]
+                                            transforms.ToTensor(),
+                                            # Pixel range [-0.5, 0.5]->[-1.0, 1.0]
+                                            transforms.Normalize(dataset_norm_factor, dataset_norm_factor)])
+    assert FLAGS.dataset in ['MNIST', 'FashionMNIST', 'CIFAR10']
+    dataset = eval(FLAGS.dataset)(root='./data', train=True, download=True, transform=dataset_transform)
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=FLAGS.batch_size, shuffle=True,
         num_workers=FLAGS.num_workers, drop_last=True)
@@ -121,8 +124,9 @@ def train():
         model_cfg = json.loads(f.read())
 
     # model setup
-    net_model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                             input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
+    net_model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'],
+                             cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
+                             input_size=FLAGS.input_size, input_ch=FLAGS.input_ch,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
@@ -275,8 +279,9 @@ def evaluate():
         model_cfg = json.loads(f.read())
 
     # model setup
-    model = DenoisingNet(T=FLAGS.T, cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                         input_size=FLAGS.img_size, input_ch=FLAGS.img_ch,
+    model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'],
+                         cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
+                         input_size=FLAGS.input_size, input_ch=FLAGS.input_ch,
                          beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     if FLAGS.parallel:
         model = torch.nn.DataParallel(model)
