@@ -82,7 +82,7 @@ class DenoisingNet(nn.Module):
         # To get x_0, alpha_bar_0 (i.e. alpha_bar_prev for timestep 1) is needed
         # For both DDPM and DDIM scenario, it is defined as 1.0
         cfg_idx_lut = []
-        assert sum(cfg_ratio) <= 1.0 and len(cfg) == len(cfg_ratio)
+        assert sum(cfg_ratio) == 1.0 and len(cfg) == len(cfg_ratio)
         for i, ratio in enumerate(cfg_ratio):
             length = math.ceil(ratio*T)
             length = min(length, T-len(cfg_idx_lut))
@@ -144,6 +144,8 @@ class DenoisingNet(nn.Module):
     # including x_T that sampling needed (x_T given or unknown)
     def get_noise(self, n, device, mode='all', x_T=None):
         if mode == 'single' or (mode == 'all' and self.use_ddim):
+            if mode == 'all' and self.use_ddim and x_T is not None:
+                return x_T.to(device)
             assert x_T is None
             return torch.randn(n, *self.img_size).to(device)
         elif mode == 'all' and not self.use_ddim:

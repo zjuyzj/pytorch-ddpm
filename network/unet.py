@@ -46,7 +46,8 @@ class UpSample(nn.Module):
 class AttnBlock(nn.Module):
     def __init__(self, in_ch):
         super().__init__()
-        self.group_norm = nn.GroupNorm(32, in_ch)
+        # self.group_norm = nn.GroupNorm(32, in_ch)
+        self.batch_norm = nn.BatchNorm2d(in_ch)
         self.proj_q = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
         self.proj_k = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
         self.proj_v = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
@@ -61,7 +62,8 @@ class AttnBlock(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        h = self.group_norm(x)
+        # h = self.group_norm(x)
+        h = self.batch_norm(x)
         q = self.proj_q(h)
         k = self.proj_k(h)
         v = self.proj_v(h)
@@ -85,12 +87,14 @@ class ResBlock(nn.Module):
     def __init__(self, in_ch, out_ch, dropout, attn=False):
         super().__init__()
         self.block1 = nn.Sequential(
-            nn.GroupNorm(32, in_ch),
+            # nn.GroupNorm(32, in_ch),
+            nn.BatchNorm2d(in_ch),
             Swish(),
             nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
         )
         self.block2 = nn.Sequential(
-            nn.GroupNorm(32, out_ch),
+            # nn.GroupNorm(32, out_ch),
+            nn.BatchNorm2d(out_ch),
             Swish(),
             nn.Dropout(dropout),
             nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
@@ -159,7 +163,8 @@ class UNet(nn.Module):
         assert len(chs) == 0
 
         self.tail = nn.Sequential(
-            nn.GroupNorm(32, now_ch),
+            # nn.GroupNorm(32, now_ch),
+            nn.BatchNorm2d(now_ch),
             Swish(),
             nn.Conv2d(now_ch, input_ch, 3, stride=1, padding=1)
         )
