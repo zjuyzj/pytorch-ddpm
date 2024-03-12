@@ -5,6 +5,7 @@ data
 logs
 ckpts
 
+samples.*
 *.sh
 
 .python-version

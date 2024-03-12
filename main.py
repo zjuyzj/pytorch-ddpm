@@ -35,8 +35,8 @@ flags.DEFINE_string('dataset', 'CIFAR10', help='dataset selection (CIFAR10/MNIST
 flags.DEFINE_float('lr', 2e-4, help='target learning rate')
 flags.DEFINE_float('grad_clip', 1., help="gradient norm clipping")
 flags.DEFINE_integer('total_steps', 800000, help='total training steps')
-flags.DEFINE_integer('input_size', 32, help='size of image fed into the network (in 2^k for UNet) as well as the output')
-flags.DEFINE_integer('input_ch', 3, help='image channel (must match the train set)')
+flags.DEFINE_integer('img_size', 32, help='size of image fed into the network (in 2^k for UNet) as well as the output')
+flags.DEFINE_integer('img_ch', 3, help='image channel (must match the train set)')
 flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
 flags.DEFINE_integer('batch_size', 128, help='batch size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
@@ -92,8 +92,8 @@ def _eval(model):
         desc = "generating images"
         for i in trange(0, FLAGS.num_images, FLAGS.batch_size, desc=desc):
             batch_size = min(FLAGS.batch_size, FLAGS.num_images - i)
-            noises = model.get_noise(batch_size, device, 'all')
-            batch_images = model(noises.to(device)).clip(-1, 1).cpu()
+            x_T, Z = model.get_noise(batch_size, device, 'all')
+            batch_images = model(x_T, Z).clip(-1, 1).cpu()
             # Data range from [-1, 1] to [0, 1]
             images.append((batch_images + 1) / 2)
         images = torch.cat(images, dim=0).numpy()
@@ -106,9 +106,9 @@ def _eval(model):
 
 def train():
     # dataset setup
-    dataset_norm_factor = tuple([0.5]*FLAGS.input_ch)
+    dataset_norm_factor = tuple([0.5]*FLAGS.img_ch)
     dataset_transform = transforms.Compose([transforms.RandomHorizontalFlip(),
-                                            transforms.Resize(FLAGS.input_size),
+                                            transforms.Resize(FLAGS.img_size),
                                             # Pixel range [0, 1.0]
                                             transforms.ToTensor(),
                                             # Pixel range [-0.5, 0.5]->[-1.0, 1.0]
@@ -124,9 +124,9 @@ def train():
         model_cfg = json.loads(f.read())
 
     # model setup
-    net_model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'],
-                             cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                             input_size=FLAGS.input_size, input_ch=FLAGS.input_ch,
+    net_model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'], cfg=model_cfg['cfg'], 
+                             ratio_cfg=model_cfg['ratio_cfg'], ratio_size=model_cfg['ratio_size'], 
+                             img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
@@ -136,7 +136,7 @@ def train():
             ema_model = torch.nn.DataParallel(ema_model)
         net_model = torch.nn.DataParallel(net_model)
 
-    # sample_noises for sampling using net_model during training process
+    # Noises (x_T, Z) for sampling using net_model during training process
     sample_noises = net_model.get_noise(FLAGS.sample_size, device, 'all')
     # show model size
     model_size = 0
@@ -177,7 +177,9 @@ def train():
     # start training
     with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
         # Do optimization on the full net with a mini-batch each step
-        timesteps = net_model.get_t_series() if not FLAGS.end2end else [None]
+        timesteps = net_model.get_t_series()
+        # timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
+        if FLAGS.end2end: timesteps = timesteps[-1]
         for step in pbar:
             # train
             x_0, new_epoch = next(datalooper)
@@ -186,21 +188,19 @@ def train():
             x_0, losses = x_0.to(device), []
             for t in timesteps: # Every layer should be optimized with the same mini-batch
                 optim.zero_grad()
-                noise = net_model.get_noise(x_0.shape[0], device, mode='single')
+                noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
+                x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
-                    # timesteps[-1] equals FLAGS.T when DDIM sampling is enabled
-                    x_T = net_model.add_noise(x_0, noise, FLAGS.T)
-                    noises = net_model.get_noise(x_0.shape[0], device, 'all', x_T)
-                    x_0_pred = net_model(noises)
+                    Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
+                    x_0_pred = net_model(x_t, Z) # x_t is x_T here
                     loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
-                    x_t = net_model.add_noise(x_0, noise, t)
-                    noise_pred = net_model(x_t, t)
+                    noise_pred_t = net_model(x_t, None, t=t)
                     # graph_param = dict(list(net_model.named_parameters()))
                     # graph = make_dot(noise_pred, params=graph_param)
                     # graph.render('graph', format='png')
-                    loss = F.mse_loss(noise_pred, noise, reduction='none').mean()
+                    loss = F.mse_loss(noise_pred_t, noise_t, reduction='none').mean()
                     pbar_postfix['layer_loss'] = '%.2e' % loss
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(
@@ -225,7 +225,7 @@ def train():
             if FLAGS.sample_step > 0 and step % FLAGS.sample_step == 0:
                 net_model.eval()
                 with torch.no_grad():
-                    pred_x_0 = net_model(sample_noises).clip(-1, 1)
+                    pred_x_0 = net_model(*sample_noises).clip(-1, 1)
                     grid = (make_grid(pred_x_0) + 1) / 2
                     path = os.path.join(
                         FLAGS.logdir, 'sample', '%d.png' % step)
@@ -279,9 +279,9 @@ def evaluate():
         model_cfg = json.loads(f.read())
 
     # model setup
-    model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'],
-                         cfg=model_cfg['cfg'], cfg_ratio=model_cfg['cfg_ratio'],
-                         input_size=FLAGS.input_size, input_ch=FLAGS.input_ch,
+    model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'], cfg=model_cfg['cfg'], 
+                         ratio_cfg=model_cfg['ratio_cfg'], ratio_size=model_cfg['ratio_size'],
+                         img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
                          beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     if FLAGS.parallel:
         model = torch.nn.DataParallel(model)
