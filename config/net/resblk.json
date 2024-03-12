@@ -2,8 +2,8 @@
     "net_type": "ResBlock", 
     "cfg": [
         {
-            "stage_ch": [32, 128, 128, 256, 128, -1],
-            "block_in_stage": [1, 2, 2, 2, 2, 1]
+            "stage_ch": [32, 128, 128, 256, 128],
+            "block_in_stage": [1, 2, 2, 2, 2]
         }
     ],
     "ratio_cfg": [1.0],

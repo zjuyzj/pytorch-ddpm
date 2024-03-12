@@ -194,13 +194,14 @@ def _img_tensor_to_np(img_tensor):
 if __name__ == '__main__':
     # 1 - Build the network
     device, sample_size = torch.device('cpu'), 5
-    # net_type, cfg = 'ResBlock', [{'stage_ch': [32, 128, 128, 256, 128, 3], 'block_in_stage': [1, 2, 2, 2, 2, 1]}]
-    net_type, cfg = 'UNet', [{'ch': 128, 'ch_mult': [1, 2, 2, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
-                             {'ch': 64, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 1, 'dropout': 0.1},
-                             {'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
-                             {'ch': 32, 'ch_mult': [1], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1},
-                             {'ch': 16, 'ch_mult': [1, 2], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1}]
-    ratio_cfg, ratio_size = [0.1, 0.35, 0.25, 0.15, 0.15], [0.5, 0.2, 0.1, 0.1, 0.1]
+    net_type, cfg = 'ResBlock', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]}]
+    ratio_cfg, ratio_size = [1.0], [1.0]
+    # net_type, cfg = 'UNet', [{'ch': 128, 'ch_mult': [1, 2, 2, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
+    #                          {'ch': 64, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 1, 'dropout': 0.1},
+    #                          {'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
+    #                          {'ch': 32, 'ch_mult': [1], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1},
+    #                          {'ch': 16, 'ch_mult': [1, 2], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1}]
+    # ratio_cfg, ratio_size = [0.1, 0.35, 0.25, 0.15, 0.15], [0.5, 0.2, 0.1, 0.1, 0.1]
     model = DenoisingNet(1000, net_type, cfg, ratio_cfg, ratio_size, tau_S=20).to(device).eval()
     # print(model)
 
