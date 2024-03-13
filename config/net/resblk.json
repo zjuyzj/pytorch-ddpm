@@ -1,5 +1,5 @@
 {
-    "net_type": "ResBlock", 
+    "net_type": "ResNet", 
     "cfg": [
         {
             "stage_ch": [32, 128, 128, 256, 128],

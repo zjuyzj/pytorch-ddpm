@@ -4,7 +4,7 @@ from torch import nn
 from torch.nn.functional import interpolate
 import matplotlib.pyplot as plt
 from network.unet import UNet
-from network.resblk import ResBlock
+from network.resnet import ResNet
 
 
 class DenoisingModule(nn.Module):
@@ -13,9 +13,9 @@ class DenoisingModule(nn.Module):
                  alpha, alpha_bar, alpha_bar_prev,
                  large_entropy=True, use_ddim=False):
         super().__init__()
-        assert feat_net_type in ['UNet', 'ResBlock']
-        if feat_net_type == 'ResBlock':
-            self.noise_pred = ResBlock(input_size, input_ch, feat_net_cfg)
+        assert feat_net_type in ['UNet', 'ResNet']
+        if feat_net_type == 'ResNet':
+            self.noise_pred = ResNet(input_size, input_ch, feat_net_cfg)
         elif feat_net_type == 'UNet': 
             self.noise_pred = UNet(**feat_net_cfg, input_size=input_size, input_ch=input_ch)
         self.use_ddim = use_ddim
@@ -194,7 +194,7 @@ def _img_tensor_to_np(img_tensor):
 if __name__ == '__main__':
     # 1 - Build the network
     device, sample_size = torch.device('cpu'), 5
-    net_type, cfg = 'ResBlock', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]}]
+    net_type, cfg = 'ResNet', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]}]
     ratio_cfg, ratio_size = [1.0], [1.0]
     # net_type, cfg = 'UNet', [{'ch': 128, 'ch_mult': [1, 2, 2, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
     #                          {'ch': 64, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 1, 'dropout': 0.1},
