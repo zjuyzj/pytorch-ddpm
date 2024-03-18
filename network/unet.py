@@ -44,10 +44,9 @@ class UpSample(nn.Module):
 
 
 class AttnBlock(nn.Module):
-    def __init__(self, in_ch):
+    def __init__(self, in_ch, num_groups):
         super().__init__()
-        # self.group_norm = nn.GroupNorm(32, in_ch)
-        self.batch_norm = nn.BatchNorm2d(in_ch)
+        self.group_norm = nn.GroupNorm(num_groups, in_ch)
         self.proj_q = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
         self.proj_k = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
         self.proj_v = nn.Conv2d(in_ch, in_ch, 1, stride=1, padding=0)
@@ -62,8 +61,7 @@ class AttnBlock(nn.Module):
 
     def forward(self, x):
         B, C, H, W = x.shape
-        # h = self.group_norm(x)
-        h = self.batch_norm(x)
+        h = self.group_norm(x)
         q = self.proj_q(h)
         k = self.proj_k(h)
         v = self.proj_v(h)
@@ -84,17 +82,15 @@ class AttnBlock(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, dropout, attn=False):
+    def __init__(self, in_ch, out_ch, dropout, num_groups, attn=False):
         super().__init__()
         self.block1 = nn.Sequential(
-            # nn.GroupNorm(32, in_ch),
-            nn.BatchNorm2d(in_ch),
+            nn.GroupNorm(num_groups, in_ch),
             Swish(),
             nn.Conv2d(in_ch, out_ch, 3, stride=1, padding=1),
         )
         self.block2 = nn.Sequential(
-            # nn.GroupNorm(32, out_ch),
-            nn.BatchNorm2d(out_ch),
+            nn.GroupNorm(num_groups, out_ch),
             Swish(),
             nn.Dropout(dropout),
             nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1),
@@ -104,7 +100,7 @@ class ResBlock(nn.Module):
         else:
             self.shortcut = nn.Identity()
         if attn:
-            self.attn = AttnBlock(out_ch)
+            self.attn = AttnBlock(out_ch, num_groups)
         else:
             self.attn = nn.Identity()
         self.initialize()
@@ -125,7 +121,7 @@ class ResBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, ch, ch_mult, attn, num_res_blocks, dropout, input_size=32, input_ch=3):
+    def __init__(self, ch, ch_mult, attn, num_res_blocks, dropout, num_groups, input_size=32, input_ch=3):
         super().__init__()
         assert all([i < len(ch_mult) for i in attn]), 'attn index out of bound'
         assert input_size & (input_size-1) == 0, 'input size is not in 2^k'
@@ -138,7 +134,8 @@ class UNet(nn.Module):
             for _ in range(num_res_blocks):
                 self.downblocks.append(ResBlock(
                     in_ch=now_ch, out_ch=out_ch,
-                    dropout=dropout, attn=(i in attn)))
+                    dropout=dropout, num_groups=num_groups,
+                    attn=(i in attn)))
                 now_ch = out_ch
                 chs.append(now_ch)
             if i != len(ch_mult) - 1:
@@ -146,8 +143,8 @@ class UNet(nn.Module):
                 chs.append(now_ch)
 
         self.middleblocks = nn.ModuleList([
-            ResBlock(now_ch, now_ch, dropout, attn=True),
-            ResBlock(now_ch, now_ch, dropout, attn=False),
+            ResBlock(now_ch, now_ch, dropout, num_groups=num_groups, attn=True),
+            ResBlock(now_ch, now_ch, dropout, num_groups=num_groups, attn=False),
         ])
 
         self.upblocks = nn.ModuleList()
@@ -156,15 +153,14 @@ class UNet(nn.Module):
             for _ in range(num_res_blocks + 1):
                 self.upblocks.append(ResBlock(
                     in_ch=chs.pop() + now_ch, out_ch=out_ch,
-                    dropout=dropout, attn=(i in attn)))
+                    dropout=dropout, num_groups=num_groups, attn=(i in attn)))
                 now_ch = out_ch
             if i != 0:
                 self.upblocks.append(UpSample(now_ch))
         assert len(chs) == 0
 
         self.tail = nn.Sequential(
-            # nn.GroupNorm(32, now_ch),
-            nn.BatchNorm2d(now_ch),
+            nn.GroupNorm(num_groups, now_ch),
             Swish(),
             nn.Conv2d(now_ch, input_ch, 3, stride=1, padding=1)
         )

@@ -8,8 +8,16 @@
             "attn": [1],
             "num_res_blocks": 2,
             "dropout": 0.1
+        },
+        {
+            "ch": 16,
+            "num_groups": 16,
+            "ch_mult": [1],
+            "attn": [0],
+            "num_res_blocks": 1,
+            "dropout": 0.1
         }
     ],
-    "ratio_cfg": [1.0],
+    "ratio_cfg": [0.95, 0.05],
     "ratio_size": [1.0]
 }

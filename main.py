@@ -43,7 +43,10 @@ flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
 flags.DEFINE_float('ema_decay', 0.9999, help="ema decay rate (non-positive means disable ema)")
 flags.DEFINE_bool('parallel', False, help='multi gpu training')
 flags.DEFINE_bool('end2end', True, help='enable end-to-end training')
-flags.DEFINE_bool('cont_from_ckpt', False, help='continue training from the checkpoint')
+flags.DEFINE_spaceseplist('layer_trained', '', help='specify the layer(s) to be trained')
+flags.DEFINE_bool('resume_from_ckpt', False, help='continue training from the checkpoint')
+flags.DEFINE_bool('resume_no_progress', False, help='load checkpoint but ignore the saved progress')
+flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is True')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
@@ -146,23 +149,25 @@ def train():
     print('Model params: %.2f M' % (model_size / 1024 / 1024))
 
     start_step, base_epoch = -1, 0
-    if FLAGS.cont_from_ckpt:
-        ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'))
-        net_model.load_state_dict(ckpt['net_model'])
+    if FLAGS.resume_from_ckpt:
+        layer_excluded = list(map(int, FLAGS.resume_layer_excluded))
+        ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'), map_location=device)
+        net_model.load_checkpoint(ckpt['net_model'], layer_excluded)
         if ema_model is not None:
             if ckpt['ema_model'] is None: ema_model = None
-            else: ema_model.load_state_dict(ckpt['ema_model'])
-        sched.load_state_dict(ckpt['sched'])
-        optim.load_state_dict(ckpt['optim'])
-        start_step = ckpt['step']
-        base_epoch = ckpt['epoch']
-        sample_noises = ckpt['sample_noises']
+            else: ema_model.load_checkpoint(ckpt['ema_model'], layer_excluded)
+        if not FLAGS.resume_no_progress:
+            sched.load_state_dict(ckpt['sched'])
+            optim.load_state_dict(ckpt['optim'])
+            start_step = ckpt['step']
+            base_epoch = ckpt['epoch']
+            sample_noises = ckpt['sample_noises']
 
     # log setup
     os.makedirs(os.path.join(FLAGS.logdir, 'sample'), exist_ok=True)
-    purge_step = start_step if FLAGS.cont_from_ckpt else None
+    purge_step = start_step if FLAGS.resume_from_ckpt else None
     writer = SummaryWriter(FLAGS.logdir, purge_step=purge_step)
-    if not FLAGS.cont_from_ckpt:
+    if not FLAGS.resume_from_ckpt:
         grid = (make_grid(next(iter(dataloader))[0][:FLAGS.sample_size]) + 1) / 2
         writer.add_image('real_sample', grid)
         writer.flush()
@@ -180,6 +185,11 @@ def train():
         timesteps = net_model.get_t_series()
         # timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
         if FLAGS.end2end: timesteps = timesteps[-1]
+        elif len(FLAGS.layer_trained) != 0:
+            layer_trained = list(map(int, FLAGS.layer_trained))
+            for layer_id in layer_trained:
+                assert layer_id > 0 and layer_id <= len(timesteps)
+            timesteps = [timesteps[id-1] for id in layer_trained]
         for step in pbar:
             # train
             x_0, new_epoch = next(datalooper)
@@ -288,7 +298,7 @@ def evaluate():
 
     # load model and evaluate
     ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'))
-    model.load_state_dict(ckpt['net_model'])
+    model.load_checkpoint(ckpt['net_model'])
     (IS, IS_std), FID, samples = _eval(model)
     print("Model     : IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
     save_image(
@@ -297,7 +307,7 @@ def evaluate():
         nrow=16)
 
     if ckpt['ema_model'] is not None:
-        model.load_state_dict(ckpt['ema_model'])
+        model.load_checkpoint(ckpt['ema_model'])
         (IS, IS_std), FID, samples = _eval(model)
         print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
         save_image(
