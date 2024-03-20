@@ -56,7 +56,8 @@ class DenoisingModule(nn.Module):
 
 
 class DenoisingNet(nn.Module):
-    def __init__(self, T, net_type, cfg, ratio_cfg, ratio_size, img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02, tau_S=-1):
+    def __init__(self, T, net_type, cfg, ratio_cfg, ratio_size, div_factor_size,
+                 img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02, tau_S=-1):
         super().__init__()
         self.img_ch = img_ch
         # Note that index 0 is corresspond to math variable of subscript 1
@@ -84,18 +85,19 @@ class DenoisingNet(nn.Module):
             length = math.ceil(ratio*T)
             length = min(length, T-len(cfg_idx_lut))
             cfg_idx_lut.extend([i]*length)
-        assert math.isclose(sum(ratio_size), 1.0) and 2**len(ratio_size) <= img_size
+        assert len(ratio_size) == len(div_factor_size)
+        assert math.isclose(sum(ratio_size), 1.0)
+        assert img_size//max(div_factor_size) >= 2
         for i, ratio in enumerate(ratio_size):
             length = math.ceil(ratio*T)
             length = min(length, T-len(self.size_lut))
-            self.size_lut.extend([img_size//2**i]*length)
+            self.size_lut.extend([img_size//div_factor_size[i]]*length)
         for idx, t in enumerate(self.t_series):
             alpha, alpha_bar = alphas[t-1], alphas_bar[t-1]
             # index 0 of self.t_series means t=1, which is made sure by assertion before 
             if idx == 0: alpha_bar_prev = torch.tensor(1.0, dtype=alpha_bar.dtype)
             else: alpha_bar_prev = alphas_bar[self.t_series[idx-1]-1]
-            layer_cfg_idx = cfg_idx_lut[t-1]
-            layer_cfg = cfg[layer_cfg_idx]
+            layer_cfg = cfg[cfg_idx_lut[t-1]]
             last_layer_size = layer_size if idx != 0 else None
             layer_size = self.size_lut[t-1]
             denoising = DenoisingModule(layer_size, img_ch, net_type, layer_cfg,
@@ -119,11 +121,12 @@ class DenoisingNet(nn.Module):
             if t == 'stacked': x_all, pred_eps_all = [x], []
             for index in range(num_layer-1, -1, -1):
                 layer_size = self.size_lut[self.t_series[index]-1]
-                assert x.shape[-1] == x.shape[-2] == layer_size
+                layer_shape = (self.img_ch, layer_size, layer_size)
+                assert x.shape[-3:] == layer_shape
                 if not self.use_ddim:
                     z = Z[index]
-                    assert len(z.shape) == 4 and \
-                           (z.shape[-1] == z.shape[-2] == layer_size)
+                    assert len(z.shape) == 4
+                    assert z.shape[-3:] == layer_shape
                 else: z = None
                 layer = self.net[index]
                 if t == 'stacked':
@@ -141,8 +144,8 @@ class DenoisingNet(nn.Module):
         elif t in self.t_series:
             assert Z is None
             layer_size = self.size_lut[t-1]
-            assert len(x.shape) == 4 and \
-                   (x.shape[-1] == x.shape[-2] == layer_size)
+            layer_shape = (self.img_ch, layer_size, layer_size)
+            assert len(x.shape) == 4 and x.shape[-3:] == layer_shape
             layer = self.net[self.t_to_idx[t]]
             pred_eps = layer['denoising'](x, None, mode='pred_eps_only')
             return pred_eps
@@ -160,8 +163,9 @@ class DenoisingNet(nn.Module):
             if mode in ['x_T', 'all']:
                 t = self.t_series[-1]
             assert t is not None
-            size_x_t = self.size_lut[t-1]
-            x_t = torch.randn(n, self.img_ch, size_x_t, size_x_t).to(device)
+            layer_size_t = self.size_lut[t-1]
+            layer_shape_t = (self.img_ch, layer_size_t, layer_size_t)
+            x_t = torch.randn(n, *layer_shape_t).to(device)
             if mode in ['noise_t', 'x_T']:
                 return x_t
             x_T = x_t
@@ -169,8 +173,9 @@ class DenoisingNet(nn.Module):
             if not self.use_ddim:
                 Z = [None] * len(self.t_series)
                 for idx, t in enumerate(self.t_series):
-                    size_x_t = self.size_lut[t-1]
-                    Z[idx] = torch.randn(n, self.img_ch, size_x_t, size_x_t).to(device)
+                    layer_size_t = self.size_lut[t-1]
+                    layer_shape_t = (self.img_ch, layer_size_t, layer_size_t)
+                    Z[idx] = torch.randn(n, *layer_shape_t).to(device)
             else: Z = None
             if mode == 'Z': return Z
         return x_T, Z
@@ -181,8 +186,10 @@ class DenoisingNet(nn.Module):
         t_idx = self.t_to_idx[t]
         coef_x_0 = self.coef_x_0_forward[t_idx]
         coef_noise = self.coef_noise_forward[t_idx]
-        size_x_t = self.size_lut[t-1]
-        x_0 = interpolate(x_0, size_x_t, mode='bilinear', align_corners=False)
+        layer_size = self.size_lut[t-1]
+        layer_shape = (self.img_ch, layer_size, layer_size)
+        x_0 = interpolate(x_0, layer_size, mode='bilinear', align_corners=False)
+        assert len(noise_t.shape) == 4 and noise_t.shape[-3:] == layer_shape
         return x_0*coef_x_0+noise_t*coef_noise
     
     # ID for excluded layer start from 1
@@ -235,38 +242,22 @@ def _img_tensor_to_np(img_tensor):
 if __name__ == '__main__':
     # 1 - Build the network
     device, sample_size = torch.device('cpu'), 5
-    net_type, cfg = 'ResNet', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]}]
-    ratio_cfg, ratio_size = [1.0], [1.0]
-    # net_type, cfg = 'UNet', [{'ch': 128, 'ch_mult': [1, 2, 2, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
-    #                          {'ch': 64, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 1, 'dropout': 0.1},
-    #                          {'ch': 32, 'ch_mult': [1, 2], 'attn': [1], 'num_res_blocks': 2, 'dropout': 0.1},
-    #                          {'ch': 32, 'ch_mult': [1], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1},
-    #                          {'ch': 16, 'ch_mult': [1, 2], 'attn': [], 'num_res_blocks': 1, 'dropout': 0.1}]
-    # ratio_cfg, ratio_size = [0.1, 0.35, 0.25, 0.15, 0.15], [0.5, 0.2, 0.1, 0.1, 0.1]
-    model = DenoisingNet(1000, net_type, cfg, ratio_cfg, ratio_size, tau_S=20).to(device).eval()
+    net_type, cfg = 'ResNet', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]},
+                               {'stage_ch': [16], 'block_in_stage': [1]}]
+    ratio_cfg, ratio_size, div_factor_size = [0.95, 0.05], [0.95, 0.05], [1, 2]
+    model = DenoisingNet(1000, net_type, cfg, ratio_cfg, ratio_size, div_factor_size, tau_S=20).to(device).eval()
     # print(model)
 
-    # state_dict = torch.load('./ckpts/ckpt.pt', map_location=device)['net_model']
-    # model.load_state_dict(state_dict)
-
     # 2 - Dump the network configurations
-    # print(json.dumps({'net_type': net_type, 'cfg': cfg, 'ratio_cfg': ratio_cfg, 'ratio_size': ratio_size}, indent=4))
+    # cfg_dict = {'net_type': net_type, 'cfg': cfg, 'ratio_cfg': ratio_cfg, \
+    #             'ratio_size': ratio_size, 'div_factor_size': div_factor_size}
+    # print(json.dumps(cfg_dict, indent=4))
 
     # 3 - Network loading and saving
     # torch.save(model.state_dict(), 'test.pt')
     # model.load_state_dict(torch.load('test.pt'))
 
-    # 4.1 - Show learnable parameters (Method A)
-    # state_dict, cnt = model.state_dict(keep_vars=True), 0
-    # for key in state_dict.keys():
-    #     requires_grad = state_dict[key].requires_grad
-    #     if not requires_grad:
-    #         print('[x]', key)
-    #         continue
-    #     print(cnt, key)
-    #     cnt += 1
-
-    # 4.2 - Show learnable parameters (Method B)
+    # 4 - Show learnable parameters
     # for i, (name, p) in enumerate(model.named_parameters()):
     #     print(i, name, p.requires_grad)
 
@@ -282,18 +273,18 @@ if __name__ == '__main__':
     torch.save({'x': x_all, 'pred_eps': pred_eps_all}, 'samples.pth')
 
     # 7 - Display the sampled image(s)
-    num_t_display, samples = 10, torch.load('samples.pth')
+    num_t_displayed, samples = 10, torch.load('samples.pth')
     x_all, pred_eps_all = samples['x'], samples['pred_eps']
     assert len(x_all) == len(pred_eps_all)+1
-    x_indexes = torch.linspace(0, len(x_all)-1, num_t_display, dtype=torch.int64)
+    x_indexes = torch.linspace(0, len(x_all)-1, num_t_displayed, dtype=torch.int64)
     eps_indexes = (x_indexes-1)[1:]
     x_all = [x_all[i] for i in x_indexes]
     pred_eps_all = [pred_eps_all[i] for i in eps_indexes]
     num_sample = x_all[0].shape[0]
-    fig_h, fig_w = num_sample*2, num_t_display
+    fig_h, fig_w = num_sample*2, num_t_displayed
     fig = plt.figure()
     for i in range(num_sample):
-        for j in range(num_t_display):
+        for j in range(num_t_displayed):
             img_x = _img_tensor_to_np(x_all[j][i, ...])
             fig_idx_x = (i*2)*fig_w+j+1
             fig.add_subplot(fig_h, fig_w, fig_idx_x)

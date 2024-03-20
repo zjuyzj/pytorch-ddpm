@@ -19,5 +19,6 @@
         }
     ],
     "ratio_cfg": [0.95, 0.05],
-    "ratio_size": [1.0]
+    "ratio_size": [1.0],
+    "div_factor_size": [1]
 }

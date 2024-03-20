@@ -127,9 +127,7 @@ def train():
         model_cfg = json.loads(f.read())
 
     # model setup
-    net_model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'], cfg=model_cfg['cfg'], 
-                             ratio_cfg=model_cfg['ratio_cfg'], ratio_size=model_cfg['ratio_size'], 
-                             img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
+    net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
@@ -208,7 +206,7 @@ def train():
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
                     noise_pred_t = net_model(x_t, None, t=t)
                     # graph_param = dict(list(net_model.named_parameters()))
-                    # graph = make_dot(noise_pred, params=graph_param)
+                    # graph = make_dot(noise_pred_t, params=graph_param)
                     # graph.render('graph', format='png')
                     loss = F.mse_loss(noise_pred_t, noise_t, reduction='none').mean()
                     pbar_postfix['layer_loss'] = '%.2e' % loss
@@ -289,9 +287,7 @@ def evaluate():
         model_cfg = json.loads(f.read())
 
     # model setup
-    model = DenoisingNet(T=FLAGS.T, net_type=model_cfg['net_type'], cfg=model_cfg['cfg'], 
-                         ratio_cfg=model_cfg['ratio_cfg'], ratio_size=model_cfg['ratio_size'],
-                         img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
+    model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
                          beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     if FLAGS.parallel:
         model = torch.nn.DataParallel(model)
