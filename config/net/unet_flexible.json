@@ -20,5 +20,7 @@
     ],
     "ratio_cfg": [0.95, 0.05],
     "ratio_size": [1.0],
-    "div_factor_size": [1]
+    "div_factor_size": [1],
+    "resize_policy": "x_t",
+    "loss_policy": "raw"
 }
