@@ -119,10 +119,18 @@ class DenoisingNet(nn.Module):
                            if last_layer_size and (last_layer_size != layer_size) else None
                 resize_fn={'func_x': None, 'func_eps': None, 'func_x_prev': upsample}
             elif resize_policy == 'eps': # Denoising on img_size, and noise prediction on layer_size (input_size)
-                downsample = nn.Upsample(layer_size, mode='bilinear', align_corners=False)
-                upsample = nn.Upsample(img_size, mode='bilinear', align_corners=False)
+                if loss_policy == 'resized': # SUCCEED
+                    downsample = nn.PixelUnshuffle(img_size//layer_size)
+                    upsample = nn.PixelShuffle(img_size//layer_size)
+                else: # FAIL no matter which resize_policy is
+                    # i.e. optimization problem (loss value about 0.77)
+                    # under 'resized' while abnormal sampling under 'raw'
+                    downsample = nn.Upsample(layer_size, mode='bilinear', align_corners=False)
+                    upsample = nn.Upsample(img_size, mode='bilinear', align_corners=False)
                 resize_fn={'func_x': downsample, 'func_eps': upsample, 'func_x_prev': None}
-            layer = DenoisingModule(layer_size, img_ch, net_type, layer_cfg,
+            # When PixelShuffle and PixelUnshuffle is used, layer_ch for noise predictor's I/O is img_ch*(scale_factor^2)
+            layer_ch = img_ch*(img_size//layer_size)**2 if resize_policy == 'eps' and loss_policy == 'resized' else img_ch
+            layer = DenoisingModule(layer_size, layer_ch, net_type, layer_cfg,
                                     alpha, alpha_bar, alpha_bar_prev,
                                     use_ddim=self.use_ddim, resize_fn=resize_fn)
             self.net.append(layer)
@@ -171,9 +179,9 @@ class DenoisingNet(nn.Module):
     # or all sampling noises Z, or both x_T and Z
     # noise_t is only used for training
     def get_noise(self, n, device, mode='all', t=None):
-        # x_t+raw: noise_t - layer_size, x_T and z - layer_size
-        # eps+raw: noise_t - layer_size, x_T and z - img_size
-        # eps+resized: noise_t - img_size, x_T and z - img_size
+        # x_t+raw: noise_t - layer_size, x_T and z - layer_size -> blurred
+        # eps+raw: noise_t - layer_size, x_T and z - img_size -> problematic sampling
+        # eps+resized: noise_t - img_size, x_T and z - img_size -> relative OK now
         assert mode in ['x_T', 'noise_t', 'Z', 'all']
         if mode == 'noise_t':
             assert t in self.t_series
