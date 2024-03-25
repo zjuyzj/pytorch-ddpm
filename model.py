@@ -6,6 +6,7 @@ from torch.nn.functional import interpolate
 import matplotlib.pyplot as plt
 from network.unet import UNet
 from network.resnet import ResNet
+from network.unet_t import UNet_T
 
 
 class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer training
@@ -15,11 +16,12 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
         super().__init__()
         # Mode A: 'func_x_prev' | Mode B: 'func_x'+'func_eps'
         assert set(resize_fn.keys()) == {'func_x', 'func_eps', 'func_x_prev'}
-        assert feat_net_type in ['UNet', 'ResNet']
+        assert feat_net_type in ['UNet', 'ResNet', None]
         if feat_net_type == 'ResNet':
             self.noise_pred = ResNet(input_size, input_ch, feat_net_cfg)
         elif feat_net_type == 'UNet': 
             self.noise_pred = UNet(**feat_net_cfg, input_size=input_size, input_ch=input_ch)
+        elif feat_net_type is None: self.noise_pred = None
         self.use_ddim, self.resize_fn = use_ddim, resize_fn
         # Coefficients are non-trainable, only relative to timestep T,
         # shared by all channels and all pixels, with broadcast
@@ -37,15 +39,20 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
         self.register_buffer('coef_input', coef_input)
         self.register_buffer('coef_eps', coef_eps)
 
-    def forward(self, x, z, mode='normal'):
+    def forward(self, x, z, mode='normal', predictor={'noise_pred': None, 't': None}):
         assert mode in ['normal', 'with_pred_eps', 'pred_eps_only', 'pred_eps_only_resized']
         if mode in ['pred_eps_only', 'pred_eps_only_resized']:
             assert z is None
-        if mode == 'pred_eps_only': return self.noise_pred(x)
+        if self.noise_pred is None:
+            assert predictor['noise_pred'] is not None
+        if mode == 'pred_eps_only':
+            return self.noise_pred(x) if self.noise_pred \
+                   else predictor['noise_pred'](x, predictor['t'])
         input_x = x # Backup for the original x_t
         if self.resize_fn['func_x']:
             x = self.resize_fn['func_x'](x)
-        pred_eps = self.noise_pred(x)
+        pred_eps = self.noise_pred(x) if self.noise_pred \
+                   else predictor['noise_pred'](x, predictor['t'])
         if self.resize_fn['func_eps']:
             pred_eps = self.resize_fn['func_eps'](pred_eps)
         if mode == 'pred_eps_only_resized': return pred_eps
@@ -94,6 +101,12 @@ class DenoisingNet(nn.Module):
         # For both DDPM and DDIM scenario, it is defined as 1.0
         cfg_idx_lut, self.size_lut = [], []
         assert math.isclose(sum(ratio_cfg), 1.0) and len(cfg) == len(ratio_cfg)
+        if net_type == 'UNet_T': # Only timesteps used are embedded and trained
+            assert len(cfg) == 1 # Multi-conf and resizing are not supported 
+            assert len(ratio_size) == 1 and div_factor_size[0] == 1
+            self.global_noise_pred = UNet_T(T=len(self.t_series), **cfg[0]) # Shared noise predictor
+            net_type = None # Avoid DenoisingModule to generate internal noise predictor
+        else: self.global_noise_pred = None
         for i, ratio in enumerate(ratio_cfg):
             length = math.ceil(ratio*T)
             length = min(length, T-len(cfg_idx_lut))
@@ -117,8 +130,9 @@ class DenoisingNet(nn.Module):
             if resize_policy == 'x_t':
                 upsample = nn.Upsample(last_layer_size, mode='bilinear', align_corners=False) \
                            if last_layer_size and (last_layer_size != layer_size) else None
-                resize_fn={'func_x': None, 'func_eps': None, 'func_x_prev': upsample}
-            elif resize_policy == 'eps': # Denoising on img_size, and noise prediction on layer_size (input_size)
+                resize_fn = {'func_x': None, 'func_eps': None, 'func_x_prev': upsample}
+            # Denoising on img_size, and noise prediction on layer_size (input_size)
+            elif resize_policy == 'eps' and layer_size != img_size:
                 if loss_policy == 'resized': # SUCCEED
                     downsample = nn.PixelUnshuffle(img_size//layer_size)
                     upsample = nn.PixelShuffle(img_size//layer_size)
@@ -127,7 +141,8 @@ class DenoisingNet(nn.Module):
                     # under 'resized' while abnormal sampling under 'raw'
                     downsample = nn.Upsample(layer_size, mode='bilinear', align_corners=False)
                     upsample = nn.Upsample(img_size, mode='bilinear', align_corners=False)
-                resize_fn={'func_x': downsample, 'func_eps': upsample, 'func_x_prev': None}
+                resize_fn = {'func_x': downsample, 'func_eps': upsample, 'func_x_prev': None}
+            else: resize_fn = {'func_x': None, 'func_eps': None, 'func_x_prev': None}
             # When PixelShuffle and PixelUnshuffle is used, layer_ch for noise predictor's I/O is img_ch*(scale_factor^2)
             layer_ch = img_ch*(img_size//layer_size)**2 if resize_policy == 'eps' and loss_policy == 'resized' else img_ch
             layer = DenoisingModule(layer_size, layer_ch, net_type, layer_cfg,
@@ -149,12 +164,16 @@ class DenoisingNet(nn.Module):
                 if not self.use_ddim: z = Z[index]
                 else: z = None
                 layer = self.net[index]
+                if self.global_noise_pred is not None:
+                    timesteps = torch.ones((x.shape[0]), dtype=torch.long, device=x.device)*index
+                    predictor = {'noise_pred': self.global_noise_pred, 't': timesteps}
+                else: predictor={'noise_pred': None}
                 if t == 'stacked':
-                    x, pred_eps = layer(x, z, mode='with_pred_eps')
+                    x, pred_eps = layer(x, z, mode='with_pred_eps', predictor=predictor)
                     x_all.insert(0, x)
                     pred_eps_all.insert(0, pred_eps)
                 else:
-                    x = layer(x, z, mode='normal')
+                    x = layer(x, z, mode='normal', predictor=predictor)
             if t == 'stacked':
                 return x_all, pred_eps_all
             else: return x
@@ -162,13 +181,17 @@ class DenoisingNet(nn.Module):
         elif t in self.t_series:
             assert Z is None
             layer = self.net[self.t_to_idx[t]]
+            if self.global_noise_pred is not None:
+                timesteps = torch.ones((x.shape[0]), dtype=torch.long, device=x.device)*self.t_to_idx[t]
+                predictor = {'noise_pred': self.global_noise_pred, 't': timesteps}
+            else: predictor={'noise_pred': None}
             # Return the original output of noise predictor to calc loss
             if self.loss_policy == 'raw':
-                pred_eps = layer(x, None, mode='pred_eps_only')
+                pred_eps = layer(x, None, mode='pred_eps_only', predictor=predictor)
             # Return the resized pred_eps to calc loss, not available when 
             # resize_mode is 'x_t' cause loss is calculated on epsilon
             elif self.loss_policy == 'resized':
-                pred_eps = layer(x, None, mode='pred_eps_only_resized')
+                pred_eps = layer(x, None, mode='pred_eps_only_resized', predictor=predictor)
             return pred_eps
         return None
     
