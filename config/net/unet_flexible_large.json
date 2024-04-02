@@ -2,7 +2,7 @@
     "net_type": "UNet", 
     "cfg": [
         {
-            "ch": 32,
+            "ch": 128,
             "num_groups": 32,
             "ch_mult": [1, 2, 2, 2],
             "attn": [1],
@@ -10,15 +10,15 @@
             "dropout": 0.1
         },
         {
-            "ch": 16,
-            "num_groups": 16,
+            "ch": 64,
+            "num_groups": 32,
             "ch_mult": [1, 2, 2, 2],
             "attn": [1],
             "num_res_blocks": 2,
             "dropout": 0.1
         },
         {
-            "ch": 32,
+            "ch": 64,
             "num_groups": 32,
             "ch_mult": [1, 2, 2],
             "attn": [1],
@@ -26,15 +26,15 @@
             "dropout": 0.1
         },
         {
-            "ch": 16,
-            "num_groups": 16,
-            "ch_mult": [1, 2, 2],
+            "ch": 64,
+            "num_groups": 32,
+            "ch_mult": [1, 2],
             "attn": [1],
             "num_res_blocks": 2,
             "dropout": 0.1
         },
         {
-            "ch": 32,
+            "ch": 64,
             "num_groups": 32,
             "ch_mult": [1, 2],
             "attn": [1],
@@ -42,8 +42,8 @@
             "dropout": 0.1
         },
         {
-            "ch": 16,
-            "num_groups": 16,
+            "ch": 32,
+            "num_groups": 32,
             "ch_mult": [1, 2],
             "attn": [1],
             "num_res_blocks": 1,

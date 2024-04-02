@@ -67,7 +67,7 @@ flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache (m
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def ema(source, target, decay):
+def ema(source, target, decay): # BUG
     source_dict = source.state_dict()
     target_dict = target.state_dict()
     for key in source_dict.keys():
@@ -137,7 +137,7 @@ def train():
             ema_model = torch.nn.DataParallel(ema_model)
         net_model = torch.nn.DataParallel(net_model)
 
-    # Noises (x_T, Z) for sampling using net_model during training process
+    # Noises (x_T, Z) for sampling during training process
     sample_noises = net_model.get_noise(FLAGS.sample_size, device, 'all')
     # show model size
     model_size = 0
@@ -182,7 +182,7 @@ def train():
         # Do optimization on the full net with a mini-batch each step
         timesteps = net_model.get_t_series()
         # timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
-        if FLAGS.end2end: timesteps = timesteps[-1]
+        if FLAGS.end2end: timesteps = [timesteps[-1]]
         elif len(FLAGS.layer_trained) != 0:
             layer_trained = list(map(int, FLAGS.layer_trained))
             for layer_id in layer_trained:
@@ -199,8 +199,12 @@ def train():
                 noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
+                    # DEBUG: Check sematic consistency for end2end network
+                    # save_image((make_grid(x_0)+1)/2, 'x_0.png')
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
                     x_0_pred = net_model(x_t, Z) # x_t is x_T here
+                    # save_image((make_grid(x_0_pred)+1)/2, 'x_0_pred.png')
+                    # exit()
                     loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
@@ -235,11 +239,19 @@ def train():
                 with torch.no_grad():
                     pred_x_0 = net_model(*sample_noises).clip(-1, 1)
                     grid = (make_grid(pred_x_0) + 1) / 2
-                    path = os.path.join(
-                        FLAGS.logdir, 'sample', '%d.png' % step)
+                    path = os.path.join(FLAGS.logdir, 'sample', '%d.png' % step)
                     save_image(grid, path)
                     writer.add_image('sample', grid, step)
                 net_model.train()
+                if ema_model is not None:
+                    ema_model.eval()
+                    with torch.no_grad():
+                        ema_pred_x_0 = ema_model(*sample_noises).clip(-1, 1)
+                        ema_grid = (make_grid(ema_pred_x_0) + 1) / 2
+                        ema_path = os.path.join(FLAGS.logdir, 'sample', '%d_EMA.png' % step)
+                        save_image(ema_grid, ema_path)
+                        writer.add_image('sample_EMA', ema_grid, step)
+                    ema_model.train()
 
             # save
             if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:

@@ -5,8 +5,8 @@ data
 logs
 ckpts
 
-samples.*
 *.sh
+*.png
 
 .python-version
 __pycache__

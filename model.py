@@ -1,4 +1,4 @@
-# import json
+import json
 from collections import OrderedDict
 import torch, math
 from torch import nn
@@ -246,6 +246,10 @@ class DenoisingNet(nn.Module):
     
     # ID for excluded layer start from 1
     def load_checkpoint(self, state_dict, layer_excluded=[]):
+        if self.global_noise_pred is not None:
+            assert len(layer_excluded) == 0
+            self.load_state_dict(state_dict, strict=True)
+            return
         for layer in layer_excluded:
             assert layer > 0 and layer <= len(self.net)
         # Convert layer ID to layer index
@@ -286,20 +290,15 @@ def _img_tensor_to_np(img_tensor):
     return img_np
 
 if __name__ == '__main__':
-    # 1 - Build the network
+    # 1 - Load network configurations and build the network
     device, sample_size = torch.device('cpu'), 5
-    net_type, cfg = 'ResNet', [{'stage_ch': [32, 128, 128, 256, 128], 'block_in_stage': [1, 2, 2, 2, 2]},
-                               {'stage_ch': [16], 'block_in_stage': [1]}]
-    ratio_cfg, ratio_size, div_factor_size = [0.95, 0.05], [0.95, 0.05], [1, 2]
-    resize_policy, loss_policy = 'x_t', 'raw'
-    model = DenoisingNet(1000, net_type, cfg, ratio_cfg, ratio_size, div_factor_size,
-                         resize_policy=resize_policy, loss_policy=loss_policy, tau_S=20).to(device).eval()
+    cfg_path = './config/net/unet_flexible.json'
+    with open(cfg_path, 'r') as f:
+        cfg_dict = json.loads(f.read())
+    model = DenoisingNet(1000, **cfg_dict, tau_S=100).to(device).eval()
     # print(model)
 
     # 2 - Dump the network configurations
-    # cfg_dict = {'net_type': net_type, 'cfg': cfg, 'ratio_cfg': ratio_cfg, \
-    #             'ratio_size': ratio_size, 'div_factor_size': div_factor_size, \
-    #             'resize_policy': resize_policy, 'loss_policy': loss_policy}
     # print(json.dumps(cfg_dict, indent=4))
 
     # 3 - Network loading and saving
