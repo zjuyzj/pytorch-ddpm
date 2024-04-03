@@ -66,14 +66,16 @@ flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache (m
 # os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-
-def ema(source, target, decay): # BUG
+# Only parameters which require gradient are copied to prevent 
+# possible loss of floating-point precision of constants
+def ema(source, target, decay):
     source_dict = source.state_dict()
     target_dict = target.state_dict()
-    for key in source_dict.keys():
-        target_dict[key].data.copy_(
-            target_dict[key].data * decay +
-            source_dict[key].data * (1 - decay))
+    for key, param in source.named_parameters():
+        if not param.requires_grad: continue
+        target_dict[key].data.copy_(target_dict[key].data * decay +
+                                    source_dict[key].data * (1 - decay))
+    return
 
 
 def infiniteloop(dataloader):
@@ -234,7 +236,7 @@ def train():
                 ema(net_model, ema_model, FLAGS.ema_decay)
 
             # sample
-            if FLAGS.sample_step > 0 and step % FLAGS.sample_step == 0:
+            if FLAGS.sample_step > 0 and (step+1) % FLAGS.sample_step == 0:
                 net_model.eval()
                 with torch.no_grad():
                     pred_x_0 = net_model(*sample_noises).clip(-1, 1)
@@ -248,13 +250,13 @@ def train():
                     with torch.no_grad():
                         ema_pred_x_0 = ema_model(*sample_noises).clip(-1, 1)
                         ema_grid = (make_grid(ema_pred_x_0) + 1) / 2
-                        ema_path = os.path.join(FLAGS.logdir, 'sample', '%d_EMA.png' % step)
+                        ema_path = os.path.join(FLAGS.logdir, 'sample', '%d_ema.png' % step)
                         save_image(ema_grid, ema_path)
                         writer.add_image('sample_EMA', ema_grid, step)
                     ema_model.train()
 
             # save
-            if FLAGS.save_step > 0 and step % FLAGS.save_step == 0:
+            if FLAGS.save_step > 0 and (step+1) % FLAGS.save_step == 0:
                 ckpt = {
                     'net_model': net_model.state_dict(),
                     'ema_model': ema_model.state_dict() \
@@ -267,7 +269,7 @@ def train():
                 torch.save(ckpt, os.path.join(FLAGS.logdir, 'ckpt.pt'))
 
             # evaluate
-            if FLAGS.eval_step > 0 and step % FLAGS.eval_step == 0:
+            if FLAGS.eval_step > 0 and (step+1) % FLAGS.eval_step == 0:
                 net_IS, net_FID, _ = _eval(net_model)
                 if ema_model is not None:
                     ema_IS, ema_FID, _ = _eval(ema_model)

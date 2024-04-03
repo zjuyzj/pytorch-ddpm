@@ -81,7 +81,7 @@ class DenoisingNet(nn.Module):
         if resize_policy == 'x_t': assert loss_policy == 'raw'
         self.resize_policy, self.loss_policy, = resize_policy, loss_policy
         self.img_size, self.img_ch = img_size, img_ch
-        # Note that index 0 is corresspond to math variable of subscript 1
+        # Note that index 0 corresponds to math variable of subscript 1
         betas = torch.linspace(beta_1, beta_T, T, dtype=torch.float64)
         alphas = 1.0 - betas
         alphas_bar = torch.cumprod(alphas, dim=0)
