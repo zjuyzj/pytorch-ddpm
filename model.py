@@ -153,33 +153,34 @@ class DenoisingNet(nn.Module):
     # x_0 denotes pure input image
     # Shape of tensor Z is (B, len(t_series), C, H, W) for original DDPM, and None for DDIM sampling
     # If param t is not None and in range [1, T], only noise prediction of timestep t to get x_(t-1) is calculated
-    def forward(self, x, Z, t='all'):
-        if t in ['all', 'stacked']:
+    def forward(self, x, Z, mode='all', t=None):
+        if mode in ['all', 'stacked']:
             num_layer = len(self.net)
             if not self.use_ddim:
                 assert isinstance(Z, list) and len(Z) == num_layer
             else: assert Z is None
-            if t == 'stacked': x_all, pred_eps_all = [x], []
-            for index in range(num_layer-1, -1, -1):
-                if not self.use_ddim: z = Z[index]
-                else: z = None
+            if mode == 'stacked': x_all, pred_eps_all = [x], []
+            if t is not None: assert t in self.t_series
+            index_layer_start = num_layer-1 if t is None else self.t_to_idx[t]
+            for index in range(index_layer_start, -1, -1):
+                z = Z[index] if not self.use_ddim else None
                 layer = self.net[index]
                 if self.global_noise_pred is not None:
                     timesteps = torch.ones((x.shape[0]), dtype=torch.long, device=x.device)*index
                     predictor = {'noise_pred': self.global_noise_pred, 't': timesteps}
                 else: predictor={'noise_pred': None}
-                if t == 'stacked':
+                if mode == 'stacked':
                     x, pred_eps = layer(x, z, mode='with_pred_eps', predictor=predictor)
                     x_all.insert(0, x)
                     pred_eps_all.insert(0, pred_eps)
                 else:
                     x = layer(x, z, mode='normal', predictor=predictor)
-            if t == 'stacked':
+            if mode == 'stacked':
                 return x_all, pred_eps_all
             else: return x
         # Return predicted noise from timestep t to (t-1)
-        elif t in self.t_series:
-            assert Z is None
+        elif mode == 'single':
+            assert t in self.t_series and Z is None
             layer = self.net[self.t_to_idx[t]]
             if self.global_noise_pred is not None:
                 timesteps = torch.ones((x.shape[0]), dtype=torch.long, device=x.device)*self.t_to_idx[t]
@@ -189,7 +190,7 @@ class DenoisingNet(nn.Module):
             if self.loss_policy == 'raw':
                 pred_eps = layer(x, None, mode='pred_eps_only', predictor=predictor)
             # Return the resized pred_eps to calc loss, not available when 
-            # resize_mode is 'x_t' cause loss is calculated on epsilon
+            # resize_mode is 'x_t' because loss is calculated on epsilon
             elif self.loss_policy == 'resized':
                 pred_eps = layer(x, None, mode='pred_eps_only_resized', predictor=predictor)
             return pred_eps
@@ -317,7 +318,7 @@ if __name__ == '__main__':
     # 6 - Sample from the model
     sample_noises = model.get_noise(sample_size, device, 'all')
     with torch.no_grad():
-        x_all, pred_eps_all = model(*sample_noises, t='stacked')
+        x_all, pred_eps_all = model(*sample_noises, mode='stacked')
     torch.save({'x': x_all, 'pred_eps': pred_eps_all}, 'samples.pth')
 
     # 7 - Display the sampled image(s)
@@ -352,5 +353,5 @@ if __name__ == '__main__':
     noise_T = model.get_noise(sample_size, device, mode='noise_t', t=t_s[-1])
     x_T = model.add_noise(x_all[0], noise_T, t_s[-1])
     print(x_T.shape)
-    pred_eps = model(x_T, None, t=t_s[-1])
+    pred_eps = model(x_T, None, mode='single', t=t_s[-1])
     print(pred_eps.shape)

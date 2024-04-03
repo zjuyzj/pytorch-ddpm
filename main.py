@@ -109,6 +109,24 @@ def _eval(model):
     return (IS, IS_std), FID, images
 
 
+def destroy_and_recover(model, x_0, timesteps, device, destroy_ratio):
+    # DEBUG: Check sematic consistency for end2end network before it is further trained
+    # Do this AFTER initialized with layer-by-layer pretrained weights and BEFORE fine-tuning 
+    save_image((make_grid(x_0)+1)/2, 'x_0.png')
+    print(f'[INFO] ground truth x_0.png is saved')
+    t = timesteps[int((len(timesteps)-1)*destroy_ratio)]
+    noise_t = model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
+    x_t = model.add_noise(x_0, noise_t, t)
+    save_image((make_grid(x_t)+1)/2, f'x_{t}.png')
+    print(f'[INFO] noisy image x_{t}.png is saved')
+    Z = model.get_noise(x_0.shape[0], device, mode='Z')
+    with torch.no_grad():
+        x_0_pred = model(x_t, Z, mode='all', t=t)
+    save_image((make_grid(x_0_pred)+1)/2, 'x_0_pred.png')
+    print(f'[INFO] recovered x_0_pred.png is saved')
+    exit()
+
+
 def train():
     # dataset setup
     dataset_norm_factor = tuple([0.5]*FLAGS.img_ch)
@@ -196,21 +214,18 @@ def train():
             epoch = base_epoch+new_epoch
             pbar_postfix['epoch'] = epoch
             x_0, losses = x_0.to(device), []
+            # destroy_and_recover(net_model, x_0, net_model.get_t_series(), device, 0.2)
             for t in timesteps: # Every layer should be optimized with the same mini-batch
                 optim.zero_grad()
                 noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
-                    # DEBUG: Check sematic consistency for end2end network
-                    # save_image((make_grid(x_0)+1)/2, 'x_0.png')
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
                     x_0_pred = net_model(x_t, Z) # x_t is x_T here
-                    # save_image((make_grid(x_0_pred)+1)/2, 'x_0_pred.png')
-                    # exit()
                     loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
-                    noise_pred_t = net_model(x_t, None, t=t)
+                    noise_pred_t = net_model(x_t, None, mode='single', t=t)
                     # graph_param = dict(list(net_model.named_parameters()))
                     # graph = make_dot(noise_pred_t, params=graph_param)
                     # graph.render('graph', format='png')
