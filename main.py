@@ -1,7 +1,7 @@
 import copy
 import json
 import os
-# import random
+from random import shuffle
 import warnings
 from absl import app, flags
 
@@ -25,8 +25,8 @@ flags.DEFINE_bool('eval', False, help='load ckpt.pt and evaluate FID and IS')
 # Denoising Diffusion Network
 flags.DEFINE_float('beta_1', 1e-4, help='start beta value')
 flags.DEFINE_float('beta_T', 0.02, help='end beta value')
-flags.DEFINE_integer('T', 100, help='total diffusion steps')
-flags.DEFINE_string('net_cfg', './config/net.json', help='path of network conf file (JSON)')
+flags.DEFINE_integer('T', 1000, help='total diffusion steps')
+flags.DEFINE_string('net_cfg', './config/net/unet_t.json', help='path of network conf file (JSON)')
 
 # Dataset
 flags.DEFINE_string('dataset', 'CIFAR10', help='dataset selection (CIFAR10/MNIST/FashionMNIST)')
@@ -34,29 +34,37 @@ flags.DEFINE_string('dataset', 'CIFAR10', help='dataset selection (CIFAR10/MNIST
 # Training
 flags.DEFINE_float('lr', 2e-4, help='target learning rate')
 flags.DEFINE_float('grad_clip', 1., help="gradient norm clipping")
-flags.DEFINE_integer('total_steps', 800000, help='total training steps')
+flags.DEFINE_integer('total_steps', 800, help='total training steps (in a step, all timesteps or layers is optimized once)')
 flags.DEFINE_integer('img_size', 32, help='size of image fed into the network (in 2^k for UNet) as well as the output')
 flags.DEFINE_integer('img_ch', 3, help='image channel (must match the train set)')
-flags.DEFINE_integer('warmup', 5000, help='learning rate warmup')
+flags.DEFINE_integer('warmup', 5000, help='learning rate warmup (Unit is timestep if not set sched_lr_on_timestep, else step)')
 flags.DEFINE_integer('batch_size', 128, help='batch size')
 flags.DEFINE_integer('num_workers', 4, help='workers of Dataloader')
 flags.DEFINE_float('ema_decay', 0.9999, help="ema decay rate (non-positive means disable ema)")
 flags.DEFINE_bool('parallel', False, help='multi gpu training')
-flags.DEFINE_bool('end2end', True, help='enable end-to-end training')
+flags.DEFINE_bool('end2end', False, help='enable end-to-end training')
 flags.DEFINE_spaceseplist('layer_trained', '', help='specify the layer(s) to be trained')
 flags.DEFINE_bool('resume_from_ckpt', False, help='continue training from the checkpoint')
 flags.DEFINE_bool('resume_no_progress', False, help='load checkpoint but ignore the saved progress')
 flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is True')
+# 'resample_on_timestep', 'sched_lr_on_timestep', 'randomized_timestep' and 'ema_on_timestep'
+# may be set to True when UNet_T is used to get the same performance of DDPM's baseline
+flags.DEFINE_bool('resample_on_timestep', True, help='for different layers in one training step, use resampled mini-batch from training set')
+flags.DEFINE_bool('sched_lr_on_timestep', True, help='update the learning rate on timestep rather than the whole training step')
+flags.DEFINE_bool('randomized_timestep', True, help='shuffle the timestep walked through in one training step')
+# If the model's different timesteps(layers) are not shared, 'ema_on_timestep'
+# is recommended to set to False which can save time on EMA parameter copying
+flags.DEFINE_bool('ema_on_timestep', True, help='do EMA whenever a different timestep is optimized in the whole training step')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
 flags.DEFINE_bool('log_timestep', True, help='log the loss each timestep')
 flags.DEFINE_integer('sample_size', 64, "sampling size of images")
-flags.DEFINE_integer('sample_step', 1000, help='frequency of sampling')
+flags.DEFINE_integer('sample_step', 1, help='frequency of sampling')
 flags.DEFINE_integer('tau_S', -1, help='DDIM sampling steps (non-positive means disable DDIM sampling)')
 
 # Evaluation
-flags.DEFINE_integer('save_step', 5000, help='frequency of saving checkpoints, 0 to disable during training')
+flags.DEFINE_integer('save_step', 5, help='frequency of saving checkpoints, 0 to disable during training')
 flags.DEFINE_integer('eval_step', 0, help='frequency of evaluating model, 0 to disable during training')
 flags.DEFINE_integer('num_images', 50000, help='the number of generated images for evaluation')
 flags.DEFINE_bool('fid_use_torch', False, help='calculate IS and FID on gpu')
@@ -86,8 +94,8 @@ def infiniteloop(dataloader):
         epoch_cnt += 1
 
 
-def warmup_lr(step):
-    return min(step, FLAGS.warmup) / FLAGS.warmup
+def warmup_lr(sched_step):
+    return min(sched_step, FLAGS.warmup) / FLAGS.warmup
 
 
 def _eval(model):
@@ -193,9 +201,9 @@ def train():
     with open(os.path.join(FLAGS.logdir, "flagfile.txt"), 'w') as f:
         f.write(FLAGS.flags_into_string())
 
-    pbar_postfix = {'epoch': 0, 'loss': '0', 'lr': '0'}
+    pbar_postfix = {'epoch': 'N/A', 'loss': 'N/A', 'lr': 'N/A'}
     if not FLAGS.end2end:
-        pbar_postfix.update({'layer': '0/0', 'layer_loss': '0'})
+        pbar_postfix.update({'layer': 'N/A', 'layer_loss': 'N/A'})
 
     # start training
     with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
@@ -204,18 +212,35 @@ def train():
         # timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
         if FLAGS.end2end: timesteps = [timesteps[-1]]
         elif len(FLAGS.layer_trained) != 0:
-            layer_trained = list(map(int, FLAGS.layer_trained))
-            for layer_id in layer_trained:
-                assert layer_id > 0 and layer_id <= len(timesteps)
-            timesteps = [timesteps[id-1] for id in layer_trained]
-        for step in pbar:
-            # train
-            x_0, new_epoch = next(datalooper)
-            epoch = base_epoch+new_epoch
-            pbar_postfix['epoch'] = epoch
-            x_0, losses = x_0.to(device), []
-            # destroy_and_recover(net_model, x_0, net_model.get_t_series(), device, 0.2)
+            layer_trained_idx = set()
+            for i, layer_id in enumerate(FLAGS.layer_trained):
+                assert isinstance(layer_id, str)
+                if '-' in layer_id:
+                    layer_range = list(map(int, layer_id.split('-')))
+                    assert len(layer_range) == 2
+                    layer_s, layer_e = layer_range
+                    assert layer_s > 0 and layer_e <= len(timesteps)
+                    assert layer_s <= layer_e
+                    for i in range(layer_s, layer_e+1):
+                        layer_trained_idx.add(int(i)-1)
+                else: # Convert layer ID to layer index
+                    layer_idx = int(layer_id)-1
+                    assert layer_idx >= 0 and layer_idx < len(timesteps)
+                    layer_trained_idx.add(layer_idx)
+            layer_trained_idx = sorted(layer_trained_idx)
+            timesteps = [timesteps[idx] for idx in layer_trained_idx]
+        for step in pbar: # train
+            losses = list() # Store the loss for each timesteps
+            # Record the initial learning rate per step
+            writer.add_scalar('lr', sched.get_last_lr()[0], step)
+            if FLAGS.randomized_timestep: shuffle(timesteps)
             for t in timesteps: # Every layer should be optimized with the same mini-batch
+                if FLAGS.resample_on_timestep or t == timesteps[0]:
+                    x_0, new_epoch = next(datalooper)
+                    x_0 = x_0.to(device)
+                    epoch = base_epoch+new_epoch
+                    pbar_postfix['epoch'] = epoch
+                # destroy_and_recover(net_model, x_0, net_model.get_t_series(), device, 0.2)
                 optim.zero_grad()
                 noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
                 x_t = net_model.add_noise(x_0, noise_t, t)
@@ -232,23 +257,33 @@ def train():
                     loss = F.mse_loss(noise_pred_t, noise_t, reduction='none').mean()
                     pbar_postfix['layer_loss'] = '%.2e' % loss
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(
-                    net_model.parameters(), FLAGS.grad_clip)
-                optim.step()
                 if not FLAGS.end2end and FLAGS.log_timestep:
                     writer.add_scalar(f'loss-timestep_{t}', loss, step)
                 losses.append(loss)
+                torch.nn.utils.clip_grad_norm_(net_model.parameters(), FLAGS.grad_clip)
+                optim.step()
+                if FLAGS.sched_lr_on_timestep:
+                    sched.step() 
+                    pbar_postfix['lr'] = '%.2e' % sched.get_last_lr()[0]
+                if FLAGS.ema_on_timestep:
+                    if ema_model is not None:
+                        ema(net_model, ema_model, FLAGS.ema_decay)
+                # Refresh the updated status as fast as possible
                 pbar.set_postfix(pbar_postfix, refresh=True)
             avg_loss = sum(losses) / len(losses)
             writer.add_scalar('loss', avg_loss, step)
             pbar_postfix['loss'] = '%.2e' % avg_loss
 
-            writer.add_scalar('lr', sched.get_last_lr()[0], step)
-            pbar_postfix['lr'] = '%.2e' % sched.get_last_lr()[0]
-            sched.step() # Modify the learning rate per step
+            if not FLAGS.sched_lr_on_timestep:
+                sched.step()
+                pbar_postfix['lr'] = '%.2e' % sched.get_last_lr()[0]
 
-            if ema_model is not None:
-                ema(net_model, ema_model, FLAGS.ema_decay)
+            # Refresh the status bar for post-step infos
+            pbar.set_postfix(pbar_postfix, refresh=True)
+
+            if not FLAGS.ema_on_timestep:
+                if ema_model is not None:
+                    ema(net_model, ema_model, FLAGS.ema_decay)
 
             # sample
             if FLAGS.sample_step > 0 and (step+1) % FLAGS.sample_step == 0:
