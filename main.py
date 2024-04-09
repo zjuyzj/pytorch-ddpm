@@ -45,7 +45,7 @@ flags.DEFINE_bool('parallel', False, help='multi gpu training')
 flags.DEFINE_bool('end2end', False, help='enable end-to-end training')
 flags.DEFINE_spaceseplist('layer_trained', '', help='specify the layer(s) to be trained')
 flags.DEFINE_bool('resume_from_ckpt', False, help='continue training from the checkpoint')
-flags.DEFINE_bool('resume_no_progress', False, help='load checkpoint but ignore the saved progress')
+flags.DEFINE_bool('resume_without_progress', False, help='load checkpoint but ignore the saved progress')
 flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is True')
 # 'resample_on_timestep', 'sched_lr_on_timestep', 'randomized_timestep' and 'ema_on_timestep'
 # may be set to True when UNet_T is used to get the same performance of DDPM's baseline
@@ -182,7 +182,7 @@ def train():
         if ema_model is not None:
             if ckpt['ema_model'] is None: ema_model = None
             else: ema_model.load_checkpoint(ckpt['ema_model'], layer_excluded)
-        if not FLAGS.resume_no_progress:
+        if not FLAGS.resume_without_progress:
             sched.load_state_dict(ckpt['sched'])
             optim.load_state_dict(ckpt['optim'])
             start_step = ckpt['step']
@@ -207,11 +207,8 @@ def train():
 
     # start training
     with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
-        # Do optimization on the full net with a mini-batch each step
         timesteps = net_model.get_t_series()
-        # timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
-        if FLAGS.end2end: timesteps = [timesteps[-1]]
-        elif len(FLAGS.layer_trained) != 0:
+        if len(FLAGS.layer_trained) != 0:
             layer_trained_idx = set()
             for i, layer_id in enumerate(FLAGS.layer_trained):
                 assert isinstance(layer_id, str)
@@ -229,12 +226,17 @@ def train():
                     layer_trained_idx.add(layer_idx)
             layer_trained_idx = sorted(layer_trained_idx)
             timesteps = [timesteps[idx] for idx in layer_trained_idx]
+        # If `layer_trained` is applied, do end2end training from active layer with the maximum ID down to
+        # the first layer. Otherwise, timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
+        if FLAGS.end2end: timesteps = [timesteps[-1]]
         for step in pbar: # train
             losses = list() # Store the loss for each timesteps
             # Record the initial learning rate per step
             writer.add_scalar('lr', sched.get_last_lr()[0], step)
             if FLAGS.randomized_timestep: shuffle(timesteps)
-            for t in timesteps: # Every layer should be optimized with the same mini-batch
+            for t in timesteps:
+                # If not use `resample_on_timestep`, every layer
+                # should be optimized with the same mini-batch 
                 if FLAGS.resample_on_timestep or t == timesteps[0]:
                     x_0, new_epoch = next(datalooper)
                     x_0 = x_0.to(device)
@@ -246,7 +248,7 @@ def train():
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
-                    x_0_pred = net_model(x_t, Z) # x_t is x_T here
+                    x_0_pred = net_model(x_t, Z, mode='all', t=t)
                     loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'

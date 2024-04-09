@@ -1,8 +1,5 @@
 .vscode
-
 __pycache__
-score/__pycache__
-network/__pycache__
 
 ckpts
 stats
@@ -10,3 +7,4 @@ data
 
 *.png
 *.pth
+*.pt
