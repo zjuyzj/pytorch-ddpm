@@ -1,12 +1,12 @@
 .vscode
 
+__pycache__
+score/__pycache__
+network/__pycache__
+
+ckpts
 stats
 data
-logs
-ckpts
 
-*.sh
 *.png
-
-.python-version
-__pycache__
+*.pth
