@@ -14,6 +14,7 @@ from torchvision import transforms
 from tqdm import trange
 
 from model import DenoisingNet
+from loss import VGGLoss
 from score.both import get_inception_and_fid_score
 
 # from torchviz import make_dot
@@ -47,6 +48,8 @@ flags.DEFINE_spaceseplist('layer_trained', '', help='specify the layer(s) to be 
 flags.DEFINE_bool('resume_from_ckpt', False, help='continue training from the checkpoint')
 flags.DEFINE_bool('resume_without_progress', False, help='load checkpoint but ignore the saved progress')
 flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is True')
+# Note: all samples in a mini-batch share the same timestep in this implementation although time-embedding
+# is enabled, which is different from the reference code, but it causes little performance loss
 # 'resample_on_timestep', 'sched_lr_on_timestep', 'randomized_timestep' and 'ema_on_timestep'
 # may be set to True when UNet_T is used to get the same performance of DDPM's baseline
 flags.DEFINE_bool('resample_on_timestep', True, help='for different layers in one training step, use resampled mini-batch from training set')
@@ -55,6 +58,8 @@ flags.DEFINE_bool('randomized_timestep', True, help='shuffle the timestep walked
 # If the model's different timesteps(layers) are not shared, 'ema_on_timestep'
 # is recommended to set to False which can save time on EMA parameter copying
 flags.DEFINE_bool('ema_on_timestep', True, help='do EMA whenever a different timestep is optimized in the whole training step')
+flags.DEFINE_float('lambda_vgg', 0.1, help='ratio of VGG perceptual loss for end2end training')
+flags.DEFINE_float('lambda_mse', 10, help='ratio of pixel-wise MES loss for end2end training')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
@@ -158,6 +163,7 @@ def train():
     net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
                              beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
+    if FLAGS.end2end: vgg_criterion = VGGLoss().to(device)
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
     if FLAGS.parallel:
@@ -249,7 +255,9 @@ def train():
                 if FLAGS.end2end:
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
                     x_0_pred = net_model(x_t, Z, mode='all', t=t)
-                    loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
+                    vgg_loss = vgg_criterion(x_0_pred, x_0)
+                    mse_loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
+                    loss = FLAGS.lambda_vgg*vgg_loss+FLAGS.lambda_mse*mse_loss
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
                     noise_pred_t = net_model(x_t, None, mode='single', t=t)
