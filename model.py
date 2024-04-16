@@ -1,5 +1,4 @@
 import json
-from collections import OrderedDict
 import torch, math
 from torch import nn
 from torch.nn.functional import interpolate
@@ -73,13 +72,16 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
 class DenoisingNet(nn.Module):
     def __init__(self, T, net_type, cfg, ratio_cfg,
                  ratio_size, div_factor_size, resize_policy='x_t', loss_policy='raw', 
-                 img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02, tau_S=-1):
+                 img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02, tau_S=-1,
+                 multi_step_diffusion=False):
         super().__init__()
         assert resize_policy in ['x_t', 'eps']
         assert loss_policy in ['raw', 'resized']
         # Always calc loss on epsilon under current framework
         if resize_policy == 'x_t': assert loss_policy == 'raw'
         self.resize_policy, self.loss_policy, = resize_policy, loss_policy
+        # Get and add Gaussian noise progressively rather than at once
+        self.multi_step_diffusion = multi_step_diffusion
         self.img_size, self.img_ch = img_size, img_ch
         # Note that index 0 corresponds to math variable of subscript 1
         betas = torch.linspace(beta_1, beta_T, T, dtype=torch.float64)
@@ -92,8 +94,12 @@ class DenoisingNet(nn.Module):
         assert self.t_series[0] == 1 and self.t_series[-1] == T
         t_series_idx = torch.tensor(self.t_series, dtype=torch.long)-1
         # Coefficients for forward process (add noise) 
-        self.register_buffer('coef_x_0_forward', torch.sqrt(alphas_bar)[t_series_idx])
-        self.register_buffer('coef_noise_forward', torch.sqrt(1.0-alphas_bar)[t_series_idx])
+        if not multi_step_diffusion:
+            self.register_buffer('coef_x_0_forward', torch.sqrt(alphas_bar)[t_series_idx])
+            self.register_buffer('coef_noise_forward', torch.sqrt(1.0-alphas_bar)[t_series_idx])
+        else: # In multi-step forward diffusion, timestep that not sampled during generation are also needed
+            self.register_buffer('coef_x_prev_forward', torch.sqrt(alphas))
+            self.register_buffer('coef_noise_forward', betas)
         self.t_to_idx = dict(zip(self.t_series, list(range(len(self.t_series)))))
         self.net = nn.ModuleList()
         # Denoise from timestep T to 0, finally get x_0
@@ -209,13 +215,20 @@ class DenoisingNet(nn.Module):
         assert mode in ['x_T', 'noise_t', 'Z', 'all']
         if mode == 'noise_t':
             assert t in self.t_series
-            if self.loss_policy == 'raw':
-                layer_size = self.size_lut[t-1] 
-                noise_t_shape = (self.img_ch, layer_size, layer_size)
-            elif self.loss_policy == 'resized':
-                noise_t_shape = (self.img_ch, self.img_size, self.img_size)
-            noise_t = torch.randn(n, *noise_t_shape).to(device)
-            return noise_t
+            if self.multi_step_diffusion: noise_t_collected = list()
+            # t noises is needed to get x_t from x_0
+            t_all = list(range(1, t+1)) if self.multi_step_diffusion else [t]
+            for t in t_all: # Resample the noises for different timesteps
+                if self.loss_policy == 'raw':
+                    layer_size = self.size_lut[t-1] 
+                    noise_t_shape = (self.img_ch, layer_size, layer_size)
+                elif self.loss_policy == 'resized':
+                    noise_t_shape = (self.img_ch, self.img_size, self.img_size)
+                noise_t = torch.randn(n, *noise_t_shape).to(device)
+                if not self.multi_step_diffusion: return noise_t
+                else: noise_t_collected.append(noise_t)
+            return noise_t_collected
+        assert t is None
         if mode in ['x_T', 'all']:
             x_T_size = self.img_size if self.resize_policy == 'eps' \
                        else self.size_lut[self.t_series[-1]-1]
@@ -234,16 +247,42 @@ class DenoisingNet(nn.Module):
             if mode == 'Z': return Z
         return x_T, Z
     
-    # Add noise_t to x_0, return x_t
-    # x_0 must be the same size with noise_t
-    # Always interpolate on x_0, never on noise_t
+    # Add noise to x_0, return x_t
+    # 'noise_t' is single noise if added at once, otherwise collected noise
+    # Always do interpolation on x_0, and never on noise
     def add_noise(self, x_0, noise_t, t):
         assert t in self.t_series
-        t_idx = self.t_to_idx[t]
-        coef_x_0 = self.coef_x_0_forward[t_idx]
-        coef_noise = self.coef_noise_forward[t_idx]
-        x_0 = interpolate(x_0, noise_t.shape[-1], mode='bilinear', align_corners=False)
-        return x_0*coef_x_0+noise_t*coef_noise
+        # Add noises with a progressive scheme
+        if self.multi_step_diffusion:
+            assert len(noise_t) == t
+            x_prev = x_0 # Add noise from x_0
+            for t_idx in range(t):
+                noise_t_single = noise_t[t_idx]
+                coef_x_prev = self.coef_x_prev_forward[t_idx]
+                coef_noise = self.coef_noise_forward[t_idx]
+                x_prev = interpolate(x_prev, noise_t_single.shape[-1], mode='bilinear', align_corners=False)
+                x_prev = x_prev*coef_x_prev+noise_t_single*coef_noise
+            return x_prev
+        else: # Add single noise to x_0 at once
+            t_idx = self.t_to_idx[t]
+            coef_x_0 = self.coef_x_0_forward[t_idx]
+            coef_noise = self.coef_noise_forward[t_idx]
+            x_0 = interpolate(x_0, noise_t.shape[-1], mode='bilinear', align_corners=False)
+            return x_0*coef_x_0+noise_t*coef_noise
+        
+    def get_multi_ground_truth(self, x_0, noise_t):
+        if not self.multi_step_diffusion:
+            return None
+        # 'ground_truth' is used to calculate loss
+        #  with t-1 final and intermediate and result 
+        ground_truth, x_prev = [x_0], x_0
+        for t in range(1, len(noise_t)):
+            noise_t_single = noise_t[t-1]
+            coef_x_prev = self.coef_x_prev_forward[t-1]
+            coef_noise = self.coef_noise_forward[t-1]
+            x_prev = x_prev*coef_x_prev+noise_t_single*coef_noise
+            if t in self.t_series: ground_truth.append(x_prev)
+        return ground_truth
     
     # ID for excluded layer start from 1
     def load_checkpoint(self, state_dict, layer_excluded=[]):
@@ -261,22 +300,19 @@ class DenoisingNet(nn.Module):
             layer_id = int(fields[1])
             if layer_id in layer_excluded:
                 keys_to_del.append(key)
+        # Convert the state_dict for compatibility reason, e.g. load
+        # layer-by-layer pretrained checkpoint for end2end fine-tuning
+        keys_to_del.append('coef_x_0_forward')
+        keys_to_del.append('coef_noise_forward')
         for key in keys_to_del:
             del state_dict[key]
-        # Convert the state_dict for compatibility reason, 
-        # NO NEED when *.pt is generated by the same version of code
-        new_state_dict = OrderedDict()
-        for key in state_dict.keys():
-            if key == 'coef_input_forward':
-                new_key = 'coef_x_0_forward'
-            elif key == 'coef_z_forward':
-                new_key = 'coef_noise_forward'
-            else: new_key = key
-            new_state_dict[new_key] = state_dict[key]
-        result = self.load_state_dict(new_state_dict, strict=False)
-        # result = self.load_state_dict(state_dict, strict=False)
+        result = self.load_state_dict(state_dict, strict=False)
         assert len(result.unexpected_keys) == 0
+        # Use newly constructed version of these keys
+        keys_allowed_missing = ['coef_x_prev_forward', 'coef_noise_forward']
         for missing_key in result.missing_keys:
+            if missing_key in keys_allowed_missing: continue
+            # For deleted layers, key missing is also allowed
             fields = missing_key.split('.')
             assert len(fields) >= 2 and fields[0] == 'net'
             assert int(fields[1]) in layer_excluded
@@ -293,7 +329,7 @@ def _img_tensor_to_np(img_tensor):
 if __name__ == '__main__':
     # 1 - Load network configurations and build the network
     device, sample_size = torch.device('cpu'), 5
-    cfg_path = './config/net/unet_flexible.json'
+    cfg_path = './config/net/unet_flex_small.json'
     with open(cfg_path, 'r') as f:
         cfg_dict = json.loads(f.read())
     model = DenoisingNet(1000, **cfg_dict, tau_S=100).to(device).eval()

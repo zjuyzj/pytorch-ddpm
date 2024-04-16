@@ -58,8 +58,8 @@ flags.DEFINE_bool('randomized_timestep', True, help='shuffle the timestep walked
 # If the model's different timesteps(layers) are not shared, 'ema_on_timestep'
 # is recommended to set to False which can save time on EMA parameter copying
 flags.DEFINE_bool('ema_on_timestep', True, help='do EMA whenever a different timestep is optimized in the whole training step')
-flags.DEFINE_float('lambda_vgg', 0.1, help='ratio of VGG perceptual loss for end2end training')
-flags.DEFINE_float('lambda_mse', 10, help='ratio of pixel-wise MES loss for end2end training')
+# flags.DEFINE_float('lambda_vgg', 0.1, help='ratio of VGG perceptual loss for end2end training')
+# flags.DEFINE_float('lambda_mse', 10, help='ratio of pixel-wise MES loss for end2end training')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
@@ -161,9 +161,10 @@ def train():
 
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
-                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
+                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S,
+                             multi_step_diffusion=FLAGS.end2end).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
-    if FLAGS.end2end: vgg_criterion = VGGLoss().to(device)
+    # if FLAGS.end2end: vgg_criterion = VGGLoss().to(device)
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
     if FLAGS.parallel:
@@ -254,10 +255,15 @@ def train():
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
-                    x_0_pred = net_model(x_t, Z, mode='all', t=t)
-                    vgg_loss = vgg_criterion(x_0_pred, x_0)
-                    mse_loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
-                    loss = FLAGS.lambda_vgg*vgg_loss+FLAGS.lambda_mse*mse_loss
+                    x_pred_all, _ = net_model(x_t, Z, mode='stacked', t=t)
+                    # Layers with different image size are not allowed here
+                    x_pred_all = torch.stack(x_pred_all[:-1], dim=1)
+                    x_gt_all = net_model.get_multi_ground_truth(x_0, noise_t)
+                    x_gt_all = torch.stack(x_gt_all, dim=1) # (B, S, C, H, W)
+                    loss = F.mse_loss(x_pred_all, x_gt_all, reduction='none').mean()
+                    # vgg_loss = vgg_criterion(x_0_pred, x_0)
+                    # mse_loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
+                    # loss = FLAGS.lambda_vgg*vgg_loss+FLAGS.lambda_mse*mse_loss
                 else:
                     pbar_postfix['layer'] = f'{t}/{FLAGS.T}'
                     noise_pred_t = net_model(x_t, None, mode='single', t=t)

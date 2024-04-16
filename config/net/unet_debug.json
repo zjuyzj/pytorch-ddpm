@@ -1,0 +1,15 @@
+{
+    "net_type": "UNet_T", 
+    "cfg": [
+        {
+            "ch": 32,
+            "ch_mult": [1],
+            "attn": [],
+            "num_res_blocks": 1,
+            "dropout": 0.1
+        }
+    ],
+    "ratio_cfg": [1.0],
+    "ratio_size": [1.0],
+    "div_factor_size": [1]
+}
