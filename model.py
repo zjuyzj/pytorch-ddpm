@@ -99,7 +99,7 @@ class DenoisingNet(nn.Module):
             self.register_buffer('coef_noise_forward', torch.sqrt(1.0-alphas_bar)[t_series_idx])
         else: # In multi-step forward diffusion, timestep that not sampled during generation are also needed
             self.register_buffer('coef_x_prev_forward', torch.sqrt(alphas))
-            self.register_buffer('coef_noise_forward', betas)
+            self.register_buffer('coef_noise_forward', torch.sqrt(betas))
         self.t_to_idx = dict(zip(self.t_series, list(range(len(self.t_series)))))
         self.net = nn.ModuleList()
         # Denoise from timestep T to 0, finally get x_0
