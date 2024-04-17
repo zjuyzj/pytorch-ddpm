@@ -274,8 +274,10 @@ class DenoisingNet(nn.Module):
         if not self.multi_step_diffusion:
             return None
         # 'ground_truth' is used to calculate loss
-        #  with t-1 final and intermediate and result 
+        #  with final and t-1 intermediate results
         ground_truth, x_prev = [x_0], x_0
+        # Adding noise with noise_t[-1] is dropped since
+        # it produces the input of the sampling process
         for t in range(1, len(noise_t)):
             noise_t_single = noise_t[t-1]
             coef_x_prev = self.coef_x_prev_forward[t-1]

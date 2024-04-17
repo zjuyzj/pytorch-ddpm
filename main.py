@@ -60,6 +60,8 @@ flags.DEFINE_bool('randomized_timestep', True, help='shuffle the timestep walked
 flags.DEFINE_bool('ema_on_timestep', True, help='do EMA whenever a different timestep is optimized in the whole training step')
 # flags.DEFINE_float('lambda_vgg', 0.1, help='ratio of VGG perceptual loss for end2end training')
 # flags.DEFINE_float('lambda_mse', 10, help='ratio of pixel-wise MES loss for end2end training')
+flags.DEFINE_float('end2end_loss_coef_most', 1.0, help='when end2end is set, loss coefficient of predicted image with the most noise')
+flags.DEFINE_float('end2end_loss_coef_least', 1.0, help='when end2end is set, loss coefficient of predicted image with the least noise')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
@@ -235,7 +237,10 @@ def train():
             timesteps = [timesteps[idx] for idx in layer_trained_idx]
         # If `layer_trained` is applied, do end2end training from active layer with the maximum ID down to
         # the first layer. Otherwise, timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
-        if FLAGS.end2end: timesteps = [timesteps[-1]]
+        if FLAGS.end2end:
+            loss_coef = torch.linspace(FLAGS.end2end_loss_coef_least, FLAGS.end2end_loss_coef_most,
+                                       len(timesteps), dtype=torch.float64).to(device)
+            timesteps = [timesteps[-1]]
         for step in pbar: # train
             losses = list() # Store the loss for each timesteps
             # Record the initial learning rate per step
@@ -260,7 +265,13 @@ def train():
                     x_pred_all = torch.stack(x_pred_all[:-1], dim=1)
                     x_gt_all = net_model.get_multi_ground_truth(x_0, noise_t)
                     x_gt_all = torch.stack(x_gt_all, dim=1) # (B, S, C, H, W)
-                    loss = F.mse_loss(x_pred_all, x_gt_all, reduction='none').mean()
+                    loss = F.mse_loss(x_pred_all, x_gt_all, reduction='none')
+                    loss = torch.mean(loss, dim=(0, 2, 3, 4))
+                    if FLAGS.log_timestep:
+                        for idx in range(len(loss)):
+                            t = net_model.get_t_series()[idx]
+                            writer.add_scalar(f'loss-timestep_{t}', loss[idx], step)
+                    loss = (loss_coef*loss).sum()
                     # vgg_loss = vgg_criterion(x_0_pred, x_0)
                     # mse_loss = F.mse_loss(x_0_pred, x_0, reduction='none').mean()
                     # loss = FLAGS.lambda_vgg*vgg_loss+FLAGS.lambda_mse*mse_loss
@@ -271,10 +282,10 @@ def train():
                     # graph = make_dot(noise_pred_t, params=graph_param)
                     # graph.render('graph', format='png')
                     loss = F.mse_loss(noise_pred_t, noise_t, reduction='none').mean()
+                    if FLAGS.log_timestep:
+                        writer.add_scalar(f'loss-timestep_{t}', loss, step)
                     pbar_postfix['layer_loss'] = '%.2e' % loss
                 loss.backward()
-                if not FLAGS.end2end and FLAGS.log_timestep:
-                    writer.add_scalar(f'loss-timestep_{t}', loss, step)
                 losses.append(loss)
                 torch.nn.utils.clip_grad_norm_(net_model.parameters(), FLAGS.grad_clip)
                 optim.step()
