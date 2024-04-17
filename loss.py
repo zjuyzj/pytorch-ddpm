@@ -56,6 +56,6 @@ class VGGLoss(nn.Module):
         with torch.no_grad():
             vgg_hr = _forward(hr.detach())
 
-        loss = F.mse_loss(vgg_sr, vgg_hr)
+        loss = F.mse_loss(vgg_sr, vgg_hr, reduction='none')
 
         return loss
