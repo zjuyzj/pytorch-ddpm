@@ -1,9 +1,5 @@
 rm -rf score/__pycache__
 rm -rf network/__pycache__
 rm -rf __pycache__
-rm -f ckpts/*.pt
-rm -f ckpts/events.*
-rm -f ckpts/*.txt
-rm -rf ckpts/sample
 rm -f *.png
 rm -f *.pth

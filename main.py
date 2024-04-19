@@ -45,9 +45,9 @@ flags.DEFINE_float('ema_decay', 0.9999, help="ema decay rate (non-positive means
 flags.DEFINE_bool('parallel', False, help='multi gpu training')
 flags.DEFINE_bool('end2end', False, help='enable end-to-end training')
 flags.DEFINE_spaceseplist('layer_trained', '', help='specify the layer(s) to be trained')
-flags.DEFINE_bool('resume_from_ckpt', False, help='continue training from the checkpoint')
+flags.DEFINE_string('resume_from_ckpt', '', help='continue training from certain checkpoint')
 flags.DEFINE_bool('resume_without_progress', False, help='load checkpoint but ignore the saved progress')
-flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is True')
+flags.DEFINE_spaceseplist('resume_layer_excluded', '', help='layer not loaded when resume_from_ckpt is set')
 # Note: all samples in a mini-batch share the same timestep in this implementation although time-embedding
 # is enabled, which is different from the reference code, but it causes little performance loss
 # 'resample_on_timestep', 'sched_lr_on_timestep', 'randomized_timestep' and 'ema_on_timestep'
@@ -160,6 +160,7 @@ def train():
 
     with open(FLAGS.net_cfg) as f:
         model_cfg = json.loads(f.read())
+    os.makedirs(FLAGS.logdir, exist_ok=True)
 
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
@@ -185,9 +186,9 @@ def train():
     print('Model params: %.2f M' % (model_size / 1024 / 1024))
 
     start_step, base_epoch = -1, 0
-    if FLAGS.resume_from_ckpt:
+    if len(FLAGS.resume_from_ckpt) != 0:
         layer_excluded = list(map(int, FLAGS.resume_layer_excluded))
-        ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'), map_location=device)
+        ckpt = torch.load(FLAGS.resume_from_ckpt, map_location=device)
         net_model.load_checkpoint(ckpt['net_model'], layer_excluded)
         if ema_model is not None:
             if ckpt['ema_model'] is None: ema_model = None
@@ -201,9 +202,9 @@ def train():
 
     # log setup
     os.makedirs(os.path.join(FLAGS.logdir, 'sample'), exist_ok=True)
-    purge_step = start_step if FLAGS.resume_from_ckpt else None
+    purge_step = start_step if len(FLAGS.resume_from_ckpt) != 0 else None
     writer = SummaryWriter(FLAGS.logdir, purge_step=purge_step)
-    if not FLAGS.resume_from_ckpt:
+    if len(FLAGS.resume_from_ckpt) == 0:
         grid = (make_grid(next(iter(dataloader))[0][:FLAGS.sample_size]) + 1) / 2
         writer.add_image('real_sample', grid)
         writer.flush()
