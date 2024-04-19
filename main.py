@@ -60,8 +60,8 @@ flags.DEFINE_bool('randomized_timestep', True, help='shuffle the timestep walked
 flags.DEFINE_bool('ema_on_timestep', True, help='do EMA whenever a different timestep is optimized in the whole training step')
 flags.DEFINE_float('lambda_vgg', 0, help='ratio of VGG perceptual loss for end2end training')
 flags.DEFINE_float('lambda_mse', 0, help='ratio of pixel-wise MES loss for end2end training (valid if lambda_vgg is greater than 0)')
-flags.DEFINE_float('end2end_loss_coef_most', 1.0, help='when end2end is set, loss coefficient of predicted image with the most noise')
-flags.DEFINE_float('end2end_loss_coef_least', 1.0, help='when end2end is set, loss coefficient of predicted image with the least noise')
+flags.DEFINE_float('end2end_loss_coef_most', 0, help='when end2end is set, loss coefficient of predicted image with the most noise')
+flags.DEFINE_float('end2end_loss_coef_least', 0, help='when end2end is set, loss coefficient of predicted image with the least noise')
 
 # Logging & Sampling
 flags.DEFINE_string('logdir', './ckpts', help='log directory')
@@ -240,8 +240,10 @@ def train():
         # If `layer_trained` is applied, do end2end training from active layer with the maximum ID down to
         # the first layer. Otherwise, timesteps[-1] equals FLAGS.T whether DDIM sampling is enabled or not
         if FLAGS.end2end:
-            loss_coef = torch.linspace(FLAGS.end2end_loss_coef_least, FLAGS.end2end_loss_coef_most,
-                                       len(timesteps), dtype=torch.float64).to(device)
+            loss_coef_exp = torch.linspace(FLAGS.end2end_loss_coef_least,
+                                           FLAGS.end2end_loss_coef_most,
+                                           len(timesteps), dtype=torch.float64).to(device)
+            loss_coef = torch.pow(torch.full_like(loss_coef_exp, 10.0), loss_coef_exp)
             timesteps = [timesteps[-1]]
         for step in pbar: # train
             losses = list() # Store the loss for each timesteps
