@@ -164,8 +164,7 @@ def train():
 
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
-                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S,
-                             multi_step_diffusion=FLAGS.end2end).to(device)
+                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     if FLAGS.end2end and FLAGS.lambda_vgg > 0:
         vgg_criterion = VGGLoss().to(device)
