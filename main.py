@@ -164,8 +164,7 @@ def train():
 
     # model setup
     net_model = DenoisingNet(T=FLAGS.T, **model_cfg, img_size=FLAGS.img_size, img_ch=FLAGS.img_ch,
-                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S,
-                             multi_step_diffusion=FLAGS.end2end).to(device)
+                             beta_1=FLAGS.beta_1, beta_T=FLAGS.beta_T, tau_S=FLAGS.tau_S).to(device)
     ema_model = copy.deepcopy(net_model) if FLAGS.ema_decay > 0 else None
     if FLAGS.end2end and FLAGS.lambda_vgg > 0:
         vgg_criterion = VGGLoss().to(device)
@@ -260,14 +259,18 @@ def train():
                     pbar_postfix['epoch'] = epoch
                 # destroy_and_recover(net_model, x_0, net_model.get_t_series(), device, 0.2)
                 optim.zero_grad()
-                noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
+                if FLAGS.end2end:
+                    noise_t_all = net_model.get_noise(x_0.shape[0], device, mode='noise_t')
+                    noise_t = noise_t_all[net_model.get_t_series().index(t)]
+                else:
+                    noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
                     Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
                     x_pred_all, _ = net_model(x_t, Z, mode='stacked', t=t)
                     # Layers with different image size are not allowed here
                     x_pred_all = torch.stack(x_pred_all[:-1], dim=1)
-                    x_gt_all = net_model.get_multi_ground_truth(x_0, noise_t)
+                    x_gt_all = net_model.get_multi_ground_truth(x_0, noise_t_all)
                     x_gt_all = torch.stack(x_gt_all, dim=1) # (B, S, C, H, W)
                     mse_loss = F.mse_loss(x_pred_all, x_gt_all, reduction='none')
                     mse_loss = torch.mean(mse_loss, dim=(0, 2, 3, 4))
