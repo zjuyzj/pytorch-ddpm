@@ -38,7 +38,7 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
         self.register_buffer('coef_input', coef_input)
         self.register_buffer('coef_eps', coef_eps)
 
-    def forward(self, x, z, mode='normal', predictor={'noise_pred': None, 't': None}):
+    def forward(self, x, z, mode='normal', predictor={'noise_pred': None, 't': None}, x_gt=None):
         assert mode in ['normal', 'with_pred_eps', 'pred_eps_only', 'pred_eps_only_resized']
         if mode in ['pred_eps_only', 'pred_eps_only_resized']:
             assert z is None
@@ -47,7 +47,7 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
         if mode == 'pred_eps_only':
             return self.noise_pred(x) if self.noise_pred \
                    else predictor['noise_pred'](x, predictor['t'])
-        input_x = x # Backup for the original x_t
+        input_x = x if x_gt is None else x_gt # Backup for the original x_t
         if self.resize_fn['func_x']:
             x = self.resize_fn['func_x'](x)
         pred_eps = self.noise_pred(x) if self.noise_pred \
@@ -151,7 +151,7 @@ class DenoisingNet(nn.Module):
 
     # x_0 denotes pure input image
     # If param t is not None and in range [1, T], only noise prediction of timestep t to get x_(t-1) is calculated
-    def forward(self, x, Z, mode='all', t=None):
+    def forward(self, x, Z, mode='all', t=None, x_gt_all=None):
         if mode in ['all', 'stacked']:
             num_layer = len(self.net)
             if not self.use_ddim:
@@ -168,7 +168,12 @@ class DenoisingNet(nn.Module):
                     predictor = {'noise_pred': self.global_noise_pred, 't': timesteps}
                 else: predictor={'noise_pred': None}
                 if mode == 'stacked':
-                    x, pred_eps = layer(x, z, mode='with_pred_eps', predictor=predictor)
+                    # x_gt_all: with shape (B, S, C, H, W), and for dim S
+                    # in sequence [x_0, x_1, ..., x_(T-1)] (sample steps only)
+                    if x_gt_all is not None and index != index_layer_start:
+                        x_gt = x_gt_all[:, 1:, ...][:, index, ...]
+                    else: x_gt = None
+                    x, pred_eps = layer(x, z, mode='with_pred_eps', predictor=predictor, x_gt=x_gt)
                     x_all.insert(0, x)
                     pred_eps_all.insert(0, pred_eps)
                 else:
