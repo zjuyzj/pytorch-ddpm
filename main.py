@@ -266,12 +266,12 @@ def train():
                     noise_t = net_model.get_noise(x_0.shape[0], device, mode='noise_t', t=t)
                 x_t = net_model.add_noise(x_0, noise_t, t)
                 if FLAGS.end2end:
-                    Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
-                    x_pred_all, _ = net_model(x_t, Z, mode='stacked', t=t)
-                    # Layers with different image size are not allowed here
-                    x_pred_all = torch.stack(x_pred_all[:-1], dim=1)
                     x_gt_all = net_model.get_multi_ground_truth(x_0, noise_t_all)
                     x_gt_all = torch.stack(x_gt_all, dim=1) # (B, S, C, H, W)
+                    Z = net_model.get_noise(x_0.shape[0], device, mode='Z')
+                    x_pred_all, _ = net_model(x_t, Z, mode='stacked', t=t, x_gt_all=x_gt_all)
+                    # Layers with different image size are not allowed here
+                    x_pred_all = torch.stack(x_pred_all[:-1], dim=1)
                     mse_loss = F.mse_loss(x_pred_all, x_gt_all, reduction='none')
                     mse_loss = torch.mean(mse_loss, dim=(0, 2, 3, 4))
                     if FLAGS.lambda_vgg > 0:
