@@ -90,6 +90,7 @@ class DenoisingNet(nn.Module):
         self.t_series = list(torch.arange(1, T+1, t_step).to(dtype=torch.int32).numpy())
         assert self.t_series[0] == 1 and self.t_series[-1] == T
         t_series_idx = torch.tensor(self.t_series, dtype=torch.long)-1
+        self.alphas_bar_active = alphas_bar[t_series_idx]
         # Coefficients for forward process (add noise) 
         self.register_buffer('coef_x_0_forward', torch.sqrt(alphas_bar)[t_series_idx])
         self.register_buffer('coef_noise_forward', torch.sqrt(1.0-alphas_bar)[t_series_idx])
@@ -201,6 +202,8 @@ class DenoisingNet(nn.Module):
     
     # Utilities for training and sampling
     def get_t_series(self): return self.t_series
+
+    def get_alphas_bar(self): return self.alphas_bar_active
 
     # Get single noisy image x_T or noise_t from N(0, I),
     # or all sampling noises Z, or both x_T and Z
