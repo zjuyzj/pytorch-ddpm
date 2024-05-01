@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=0 python main.py --flagfile ./config/cifar10_debug.cfg --train --end2end
+CUDA_VISIBLE_DEVICES=0 python main.py --flagfile ./config/cifar10_unet_60m.cfg --train
