@@ -1,4 +1,3 @@
-# import math
 import torch
 from torch import nn
 from torch.nn import init
@@ -8,39 +7,6 @@ from torch.nn import functional as F
 class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
-
-
-class DownSample(nn.Module):
-    def __init__(self, in_ch):
-        super().__init__()
-        self.main = nn.Conv2d(in_ch, in_ch, 3, stride=2, padding=1)
-        self.initialize()
-
-    def initialize(self):
-        init.xavier_uniform_(self.main.weight)
-        init.zeros_(self.main.bias)
-
-    def forward(self, x):
-        x = self.main(x)
-        return x
-
-
-class UpSample(nn.Module):
-    def __init__(self, in_ch):
-        super().__init__()
-        self.main = nn.Conv2d(in_ch, in_ch, 3, stride=1, padding=1)
-        self.initialize()
-
-    def initialize(self):
-        init.xavier_uniform_(self.main.weight)
-        init.zeros_(self.main.bias)
-
-    def forward(self, x):
-        _, _, H, W = x.shape
-        x = F.interpolate(
-            x, scale_factor=2, mode='nearest')
-        x = self.main(x)
-        return x
 
 
 class AttnBlock(nn.Module):
@@ -121,48 +87,26 @@ class ResBlock(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, ch, ch_mult, attn, num_res_blocks, dropout, num_groups, input_size=32, input_ch=3):
+    def __init__(self, alpha, beta, input_size=32, input_ch=3):
         super().__init__()
-        assert all([i < len(ch_mult) for i in attn]), 'attn index out of bound'
-        assert input_size & (input_size-1) == 0, 'input size is not in 2^k'
+        num_res_blocks, ch = 2*alpha, 16*beta
+        num_groups = 32 if (ch>=32 and ch%32==0) else ch
         self.head = nn.Conv2d(input_ch, ch, kernel_size=3, stride=1, padding=1)
-        self.downblocks = nn.ModuleList()
-        chs = [ch]  # record output channel when dowmsample for upsample
-        now_ch = ch
-        for i, mult in enumerate(ch_mult):
-            out_ch = ch * mult
-            for _ in range(num_res_blocks):
-                self.downblocks.append(ResBlock(
-                    in_ch=now_ch, out_ch=out_ch,
-                    dropout=dropout, num_groups=num_groups,
-                    attn=(i in attn)))
-                now_ch = out_ch
-                chs.append(now_ch)
-            if i != len(ch_mult) - 1:
-                self.downblocks.append(DownSample(now_ch))
-                chs.append(now_ch)
-
+        self.downblocks, self.upblocks = nn.ModuleList(), nn.ModuleList()
+        for _ in range(num_res_blocks): # Attention is not applied yet
+            self.downblocks.append(ResBlock(in_ch=ch, out_ch=ch, dropout=0.1,
+                                            num_groups=num_groups, attn=False))
+        for _ in range(num_res_blocks+1): # Output of self.head is also concatenated
+            self.upblocks.append(ResBlock(in_ch=2*ch, out_ch=ch, dropout=0.1,
+                                          num_groups=num_groups, attn=False))
         self.middleblocks = nn.ModuleList([
-            ResBlock(now_ch, now_ch, dropout, num_groups=num_groups, attn=True),
-            ResBlock(now_ch, now_ch, dropout, num_groups=num_groups, attn=False),
+            ResBlock(ch, ch, dropout=0.1, num_groups=num_groups, attn=True),
+            ResBlock(ch, ch, dropout=0.1, num_groups=num_groups, attn=False),
         ])
-
-        self.upblocks = nn.ModuleList()
-        for i, mult in reversed(list(enumerate(ch_mult))):
-            out_ch = ch * mult
-            for _ in range(num_res_blocks + 1):
-                self.upblocks.append(ResBlock(
-                    in_ch=chs.pop() + now_ch, out_ch=out_ch,
-                    dropout=dropout, num_groups=num_groups, attn=(i in attn)))
-                now_ch = out_ch
-            if i != 0:
-                self.upblocks.append(UpSample(now_ch))
-        assert len(chs) == 0
-
         self.tail = nn.Sequential(
-            nn.GroupNorm(num_groups, now_ch),
+            nn.GroupNorm(num_groups, ch),
             Swish(),
-            nn.Conv2d(now_ch, input_ch, 3, stride=1, padding=1)
+            nn.Conv2d(ch, input_ch, 3, stride=1, padding=1)
         )
         self.initialize()
 
@@ -173,29 +117,22 @@ class UNet(nn.Module):
         init.zeros_(self.tail[-1].bias)
 
     def forward(self, x):
-        # Downsampling
         h = self.head(x)
         hs = [h]
         for layer in self.downblocks:
             h = layer(h)
             hs.append(h)
-        # Middle
         for layer in self.middleblocks:
             h = layer(h)
-        # Upsampling
         for layer in self.upblocks:
-            if isinstance(layer, ResBlock):
-                h = torch.cat([h, hs.pop()], dim=1)
-            h = layer(h)
+            h = layer(torch.cat([h, hs.pop()], dim=1))
         h = self.tail(h)
-
         assert len(hs) == 0
         return h
 
 
 if __name__ == '__main__':
     batch_size = 8
-    model = UNet(ch=128, ch_mult=[1, 2, 2, 2], attn=[1],
-                 num_res_blocks=2, dropout=0.1)
+    model = UNet(ch=32, num_res_blocks=2, dropout=0.1, num_groups=32)
     x = torch.randn(batch_size, 3, 32, 32)
     y = model(x)

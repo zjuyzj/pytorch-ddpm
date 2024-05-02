@@ -1,0 +1,10 @@
+{
+    "net_type": "UNet", 
+    "cfg": [
+        {"alpha": 8, "beta": 4},
+        {"alpha": 6, "beta": 3},
+        {"alpha": 4, "beta": 2},
+        {"alpha": 2, "beta": 1}
+    ],
+    "ratio_cfg": [0.25, 0.25, 0.25, 0.25]
+}

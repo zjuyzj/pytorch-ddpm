@@ -92,7 +92,8 @@ def _eval(model):
         desc = "generating images"
         for i in trange(0, FLAGS.num_images, FLAGS.batch_size, desc=desc):
             batch_size = min(FLAGS.batch_size, FLAGS.num_images - i)
-            x_T = model.get_noise(batch_size, device)
+            if FLAGS.parallel: x_T = model.module.get_noise(batch_size, device)
+            else: x_T = model.get_noise(batch_size, device)
             batch_images = model(x_T)[:, 0, ...].clip(-1, 1).cpu()
             images.append((batch_images + 1) / 2)
         images = torch.cat(images, dim=0).numpy()
@@ -128,7 +129,8 @@ def train():
         if ema_model is not None:
             ema_model = torch.nn.DataParallel(ema_model)
         net_model = torch.nn.DataParallel(net_model)
-    sample_noise = net_model.get_noise(FLAGS.sample_size, device)
+    if FLAGS.parallel: sample_noise = net_model.module.get_noise(FLAGS.sample_size, device)
+    else: sample_noise = net_model.get_noise(FLAGS.sample_size, device)
 
     # show model size
     model_size = 0
@@ -142,10 +144,13 @@ def train():
     if len(FLAGS.resume_from_ckpt) != 0:
         layer_excluded = list(map(int, FLAGS.resume_layer_excluded))
         ckpt = torch.load(FLAGS.resume_from_ckpt, map_location=device)
-        net_model.load_checkpoint(ckpt['net_model'], layer_excluded)
+        if FLAGS.parallel: net_model.module.load_checkpoint(ckpt['net_model'], layer_excluded)
+        else: net_model.load_checkpoint(ckpt['net_model'], layer_excluded)
         if ema_model is not None:
             if ckpt['ema_model'] is None: ema_model = None
-            else: ema_model.load_checkpoint(ckpt['ema_model'], layer_excluded)
+            else:
+                if FLAGS.parallel: ema_model.module.load_checkpoint(ckpt['ema_model'], layer_excluded)
+                else: ema_model.load_checkpoint(ckpt['ema_model'], layer_excluded)
         if not FLAGS.resume_without_progress:
             sched.load_state_dict(ckpt['sched'])
             optim.load_state_dict(ckpt['optim'])
@@ -171,7 +176,8 @@ def train():
     with trange(start_step+1, FLAGS.total_steps, dynamic_ncols=True) as pbar:
         pbar_postfix = {'epoch': 'N/A', 'loss': 'N/A', 'lr': 'N/A'}
         # Calculate coefficient for intermediate losses
-        loss_coef = 1.0 / net_model.get_alphas_bar()
+        if FLAGS.parallel: loss_coef = 1.0 / net_model.module.get_alphas_bar()
+        else: loss_coef = 1.0 / net_model.get_alphas_bar()
         loss_coef = FLAGS.layer_loss_factor*loss_coef.to(device)
 
         for step in pbar:
@@ -185,9 +191,14 @@ def train():
             # Clean the gradient on the parameters
             optim.zero_grad()
             # Get and add noise to x_0, and get the ground truths
-            noise = net_model.get_noise(x_0.shape[0], device)
-            x_T = net_model.add_noise(x_0, noise)
-            x_gt_all = net_model.get_multi_ground_truth(x_0, noise)
+            if FLAGS.parallel:
+                noise = net_model.module.get_noise(x_0.shape[0], device)
+                x_T = net_model.module.add_noise(x_0, noise)
+                x_gt_all = net_model.module.get_multi_ground_truth(x_0, noise)
+            else:
+                noise = net_model.get_noise(x_0.shape[0], device)
+                x_T = net_model.add_noise(x_0, noise)
+                x_gt_all = net_model.get_multi_ground_truth(x_0, noise)
             # Predict images
             x_pred_all = net_model(x_T, x_gt_all)
             # Calculate and log the MES loss
@@ -272,13 +283,15 @@ def evaluate():
 
     # load model and evaluate
     ckpt = torch.load(os.path.join(FLAGS.logdir, 'ckpt.pt'))
-    model.load_checkpoint(ckpt['net_model'])
+    if FLAGS.parallel: model.module.load_checkpoint(ckpt['net_model'])
+    else: model.load_checkpoint(ckpt['net_model'])
     (IS, IS_std), FID, samples = _eval(model)
     print("Model     : IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
     save_image(torch.tensor(samples[:256]), os.path.join(FLAGS.logdir, 'samples.png'), nrow=16)
 
     if ckpt['ema_model'] is not None:
-        model.load_checkpoint(ckpt['ema_model'])
+        if FLAGS.parallel: model.module.load_checkpoint(ckpt['ema_model'])
+        else: model.load_checkpoint(ckpt['ema_model'])
         (IS, IS_std), FID, samples = _eval(model)
         print("Model(EMA): IS:%6.3f(%.3f), FID:%7.3f" % (IS, IS_std, FID))
         save_image(torch.tensor(samples[:256]), os.path.join(FLAGS.logdir, 'samples_ema.png'), nrow=16)
