@@ -1,0 +1,49 @@
+
+{
+    "mode": [
+        {"name": "train", "default": false, "help": "train from scratch"},
+        {"name": "eval", "default": false, "help": "load ckpt.pt and evaluate FID and IS"}
+    ],
+    "general": [
+        {"name": "nprocs", "default": 1, "help": "number of CPUs/GPUs used for training and evaluation"},
+        {"name": "batch_size", "default": 8, "help": "batch size, taking all devices into consideration"}
+    ],
+    "network": [
+        {"name": "beta_1", "default": 1e-4, "help": "start beta value"},
+        {"name": "beta_T", "default": 0.02, "help": "end beta value"},
+        {"name": "T", "default": 1000, "help": "total diffusion steps"},
+        {"name": "tau", "default": 100, "help": "DDIM sampling steps"},
+        {"name": "net_cfg", "default": "./config/network/unet_example.json", "help": "path of network configuration"}
+    ],
+    "dataset": [
+        {"name": "dataset", "default": "CIFAR10", "help": "dataset selection (CIFAR10/FashionMNIST)"},
+        {"name": "img_size", "default": 32, "help": "size of image"},
+        {"name": "img_ch", "default": 3, "help": "image channel"}
+    ],
+    "training_setting": [
+        {"name": "num_workers", "default": 4, "help": "workers of Dataloader"},
+        {"name": "total_steps", "default": 800000, "help": "total training steps"},
+        {"name": "warmup", "default": 200, "help": "learning rate warmup"},
+        {"name": "lr", "default": 2e-4, "help": "target learning rate"},
+        {"name": "grad_clip", "default": 1.0, "help": "gradient norm clipping"},
+        {"name": "ema_decay", "default": 0.9999, "help": "ema decay rate (non-positive means disable ema)"},
+        {"name": "layer_loss_factor", "default": 1.0, "help": "the factor multiplied on 1/alphas_bar_t for layer loss weight gamma_t"}
+    ],
+    "training_resuming": [
+        {"name": "resume_from_ckpt", "default": "", "help": "continue training from certain checkpoint"},
+        {"name": "resume_without_progress", "default": false, "help": "load checkpoint but ignore the saved progress"},
+        {"name": "resume_layer_excluded", "default": [], "help": "layer not loaded when resume_from_ckpt is set"}
+    ],
+    "training_logging": [
+        {"name": "logdir", "default": "./ckpt", "help": "log directory"},
+        {"name": "sample_step", "default": 100, "help": "frequency of sampling"},
+        {"name": "sample_size", "default": 64, "help": "sampling size of images"},
+        {"name": "save_step", "default": 500, "help": "frequency of saving checkpoints, 0 to disable during training"},
+        {"name": "eval_step", "default": 20000, "help": "frequency of evaluating model, 0 to disable during training"}
+    ],
+    "evaluation": [
+        {"name": "num_images", "default": 50000, "help": "the number of generated images for evaluation"},
+        {"name": "eval_use_torch", "default": true, "help": "calculate IS and FID on gpu"},
+        {"name": "fid_cache", "default": "./data/cifar-10-fid-cache/cifar10.train.npz", "help": "FID cache (must match the train set)"}
+    ]
+}

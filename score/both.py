@@ -13,8 +13,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 def get_inception_and_fid_score(images, fid_cache, num_images=None,
                                 splits=10, batch_size=50,
                                 use_torch=False,
-                                verbose=False,
-                                parallel=False):
+                                verbose=False):
     """when `images` is a python generator, `num_images` should be given"""
 
     if num_images is None and isinstance(images, types.GeneratorType):
@@ -29,9 +28,6 @@ def get_inception_and_fid_score(images, fid_cache, num_images=None,
     block_idx2 = InceptionV3.BLOCK_INDEX_BY_DIM['prob']
     model = InceptionV3([block_idx1, block_idx2]).to(device)
     model.eval()
-
-    if parallel:
-        model = torch.nn.DataParallel(model)
 
     if use_torch:
         fid_acts = torch.empty((num_images, 2048)).to(device)

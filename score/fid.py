@@ -143,7 +143,7 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6,
 
 
 def get_statistics(images, num_images=None, batch_size=50, use_torch=False,
-                   verbose=False, parallel=False):
+                   verbose=False):
     """when `images` is a python generator, `num_images` should be given"""
 
     if num_images is None:
@@ -157,9 +157,6 @@ def get_statistics(images, num_images=None, batch_size=50, use_torch=False,
     block_idx1 = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
     model = InceptionV3([block_idx1]).to(device)
     model.eval()
-
-    if parallel:
-        model = torch.nn.DataParallel(model)
 
     if use_torch:
         fid_acts = torch.empty((num_images, 2048)).to(device)
@@ -206,9 +203,9 @@ def get_statistics(images, num_images=None, batch_size=50, use_torch=False,
 
 
 def get_fid_score(stats_cache, images, num_images=None, batch_size=50,
-                  use_torch=False, verbose=False, parallel=False):
+                  use_torch=False, verbose=False):
     m1, s1 = get_statistics(
-        images, num_images, batch_size, use_torch, verbose, parallel)
+        images, num_images, batch_size, use_torch, verbose)
 
     f = np.load(stats_cache)
     m2, s2 = f['mu'][:], f['sigma'][:]

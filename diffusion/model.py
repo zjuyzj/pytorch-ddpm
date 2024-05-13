@@ -1,11 +1,11 @@
 import torch, math
 from torch import nn
-from network.unet import UNet
-from network.resnet import ResNet
+from .network.unet import UNet
+from .network.resnet import ResNet
 
 
 class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer training
-    def __init__(self, input_size, input_ch, feat_net_type, feat_net_cfg, alpha, alpha_bar, alpha_bar_prev):
+    def __init__(self, input_size, input_ch, feat_net_type, feat_net_cfg, alpha_bar, alpha_bar_prev):
         super().__init__()
         assert feat_net_type in ['UNet', 'ResNet', None]
         if feat_net_type == 'ResNet':
@@ -25,9 +25,9 @@ class DenoisingModule(nn.Module): # The smallest unit for layer-by-layer trainin
 
 
 class DenoisingNet(nn.Module):
-    def __init__(self, T, tau, net_type, cfg, ratio_cfg, img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02):
+    def __init__(self, device, T, tau, net_type, cfg, ratio_cfg, img_size=32, img_ch=3, beta_1=0.0001, beta_T=0.02):
         super().__init__()
-        self.img_shape = (img_ch, img_size, img_size)
+        self.img_shape, self.device = (img_ch, img_size, img_size), device
         alphas = 1.0-torch.linspace(beta_1, beta_T, T, dtype=torch.float64)
         alphas_bar = torch.cumprod(alphas, dim=0)
         timesteps = torch.arange(1, T+1, (T-1)/(tau-1)).to(dtype=torch.long)
@@ -41,11 +41,11 @@ class DenoisingNet(nn.Module):
             length = min(length, T-len(cfg_idx_lut))
             cfg_idx_lut.extend([i]*length)
         for idx, t in enumerate(timesteps):
-            alpha, alpha_bar = alphas[t-1], alphas_bar[t-1]
-            if idx == 0: alpha_bar_prev = torch.tensor(1.0, dtype=alpha_bar.dtype)
-            else: alpha_bar_prev = alphas_bar[timesteps[idx-1]-1]
+            alpha_bar = alphas_bar[t-1]
+            alpha_bar_prev = torch.tensor(1.0, dtype=alpha_bar.dtype) \
+                             if idx == 0 else alphas_bar[timesteps[idx-1]-1]
             layer_cfg = cfg[cfg_idx_lut[t-1]]
-            layer = DenoisingModule(img_size, img_ch, net_type, layer_cfg, alpha, alpha_bar, alpha_bar_prev)
+            layer = DenoisingModule(img_size, img_ch, net_type, layer_cfg, alpha_bar, alpha_bar_prev)
             self.net.append(layer)
 
     def forward(self, x, x_gt_all=None):
@@ -61,9 +61,12 @@ class DenoisingNet(nn.Module):
 
     def get_alphas_bar(self):
         return self.alphas_bar
+    
+    def get_device(self):
+        return self.device
 
-    def get_noise(self, n, device):
-        return torch.randn(n, *self.img_shape).to(device)
+    def get_noise(self, n):
+        return torch.randn(n, *self.img_shape).to(self.device)
 
     def add_noise(self, x_0, noise):       
         coef_x_0 = self.coef_x_0_forward[-1]
@@ -79,6 +82,7 @@ class DenoisingNet(nn.Module):
             ground_truth.append(gt_single)
         return torch.stack(ground_truth, dim=1)
 
+    # It only works with model checkpoint which is not wrapped with DDP
     def load_checkpoint(self, state_dict, layer_excluded=[]):
         for layer in layer_excluded:
             assert layer > 0 and layer <= len(self.net)
@@ -97,3 +101,11 @@ class DenoisingNet(nn.Module):
             fields = missing_key.split('.')
             assert len(fields) >= 2 and fields[0] == 'net'
             assert int(fields[1]) in layer_excluded
+    
+    def print_model_size(self):
+        model_size = 0
+        for param in self.parameters():
+            if not param.requires_grad: continue
+            model_size += param.data.nelement()
+        model_size /= 1024*1024
+        print('Model Parameters: %.2f M'%model_size)

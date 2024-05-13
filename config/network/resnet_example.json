@@ -1,0 +1,7 @@
+{
+    "net_type": "ResNet", 
+    "cfg": [
+        {"stage_ch": [8], "block_in_stage": [2]}
+    ],
+    "ratio_cfg": [1.0]
+}

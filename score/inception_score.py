@@ -9,13 +9,10 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 def get_inception_score(images, splits=10, batch_size=32, use_torch=False,
-                        verbose=False, parallel=False):
+                        verbose=False):
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM['prob']
     model = InceptionV3([block_idx]).to(device)
     model.eval()
-
-    if parallel:
-        model = torch.nn.DataParallel(model)
 
     preds = []
     iterator = trange(

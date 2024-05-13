@@ -30,53 +30,56 @@ implementation details.
 
     [cifar10.train.npz](https://drive.google.com/drive/folders/1UBdzl6GtNMwNQ5U-4ESlIer43tNjiGJC?usp=sharing)
 
-    Create folder `stats` for `cifar10.train.npz`.
+    Create folder `data/cifar-10-fid-cache` for `cifar10.train.npz`.
     ```
-    stats
-    └── cifar10.train.npz
+    data
+    └──cifar-10-fid-cache
+       └── cifar10.train.npz
     ```
 
 ## Train From Scratch
 - Take CIFAR10 for example:
     ```
-    python main.py --train \
-        --flagfile ./config/CIFAR10.txt
+    python main.py \
+        --flagfile ./config/cifar10_unet_example.cfg \
+        --train
     ```
 - [Optional] Overwrite arguments
     ```
-    python main.py --train \
-        --flagfile ./config/CIFAR10.txt \
+    python main.py \
+        --flagfile ./config/cifar10_unet_example.cfg \
+        --train \
         --batch_size 64 \
         --logdir ./path/to/logdir
     ```
 - [Optional] Select GPU IDs
     ```
-    CUDA_VISIBLE_DEVICES=1 python main.py --train \
-        --flagfile ./config/CIFAR10.txt
+    CUDA_VISIBLE_DEVICES=1 python main.py \
+        --flagfile ./config/cifar10_unet_example.cfg \
+        --train
     ```
 - [Optional] Multi-GPU training
     ```
-    CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py --train \
-        --flagfile ./config/CIFAR10.txt \
-        --parallel
+    CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
+        --flagfile ./config/cifar10_unet_example.cfg \
+        --train \
+        --nprocs=4
     ```
 
 ## Evaluate
-- A `flagfile.txt` is autosaved to your log directory. The default logdir for `config/CIFAR10.txt` is `./logs/DDPM_CIFAR10_EPS`
+- A `flagfile.txt` is autosaved to your log directory. The default logdir for `config/cifar10_unet_example.cfg` is `./ckpt/cifar10_unet_example`
 - Start evaluation
     ```
-    python main.py \
-        --flagfile ./logs/DDPM_CIFAR10_EPS/flagfile.txt \
-        --notrain \
-        --eval
+    python main.py
+        --flagfile ./ckpt/cifar10_unet_example/flagfile.txt \
+        --notrain --eval
     ```
 - [Optional] Multi-GPU evaluation
     ```
     CUDA_VISIBLE_DEVICES=0,1,2,3 python main.py \
-        --flagfile ./logs/DDPM_CIFAR10_EPS/flagfile.txt \
-        --notrain \
-        --eval \
-        --parallel
+        --flagfile ./ckpt/cifar10_unet_example/flagfile.txt \
+        --notrain --eval \
+        --nprocs=4
     ```
 
 
@@ -84,7 +87,7 @@ implementation details.
 
 ### CIFAR10
 - FID: 3.249, Inception Score: 9.475(0.174)
-![](./images/cifar10_samples.png)
+![](./asset/cifar10_samples.png)
 
 The checkpoint can be downloaded from my [drive](https://drive.google.com/file/d/1IhdFcdNZJRosi3XRT7-qNmiPGTuyuEXr/view?usp=sharing).
 

@@ -1,1 +1,1 @@
-CUDA_VISIBLE_DEVICES=0 python main.py --flagfile ./config/cifar10_unet_0.cfg --notrain --eval --fid_use_torch
+CUDA_VISIBLE_DEVICES=0 python main.py --flagfile ./config/cifar10_unet_example.cfg --notrain --eval --eval_use_torch
